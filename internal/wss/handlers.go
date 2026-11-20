@@ -296,7 +296,25 @@ func (h *Hub) notify(ctx context.Context, env wire.Envelope) {
 		h.log.Error("failed to list devices", "daemon_id", env.DaemonID, "err", err)
 		return
 	}
+	// 同 APNs token 的多行 device 记录是反复重配对的残影：每配对一次新建
+	// 一行，旧行 credential 已死但 token 与现役行相同。扇出按 token 归一，
+	// 只投 LastSeenAt 最新的行——否则每条残影行各自走一遍抑制判定：旧行
+	// 缺 push-to-start token 时必然落入「fail-safe 发 alert」分支，同一
+	// 审批横幅按残影行数重复轰炸（2026-11-20 真机：1 条审批事件、alert
+	// 推送 ×11 且全部 200 = 同 token 多行全被 APNs 受理，collapse-id 折叠
+	// 成一条反复刷新，用户点它 = 通知默认动作 = 进 App）。
+	byToken := make(map[string]store.Device, len(devices))
 	for _, d := range devices {
+		if d.APNSToken == "" {
+			// 无 token 行收不到 alert，原样保留（不占 token 桶）。
+			byToken[d.ID] = d
+			continue
+		}
+		if cur, ok := byToken[d.APNSToken]; !ok || d.LastSeenAt > cur.LastSeenAt {
+			byToken[d.APNSToken] = d
+		}
+	}
+	for _, d := range byToken {
 		device := d
 		// 不继承连接的 ctx：daemon 断线不应取消已排队的 APNs 投递。
 		go h.cfg.Notifier.Notify(context.Background(), device, env)
