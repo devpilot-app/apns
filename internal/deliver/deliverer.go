@@ -413,6 +413,7 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 		token, session := sessionToken, env.SessionID
 		key := "cloud/" + device.ID + "/" + session
 		push := wire.CloudApprovalPushFor(env, now, false)
+		var surfaced bool   // 本次是否对该审批出了卡面推送(alert 抑制判据)
 		d.throttle.Do(key, func() {
 			res := d.push(tier, cloudLAPushKind, device.ID, env, apns.Request{
 				DeviceToken: token,
@@ -423,14 +424,44 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 				Expiration:  now + liveActivityTTL,
 				Payload:     push,
 			})
-			if res.Prune && isEnd {
-				// 终局推送才发现 token 失效:顺手剪枝。
-				if err := d.cfg.Store.DeleteLAToken(device.ID, session); err != nil {
-					d.log.Warn("failed to delete stale LA token", "device_id", device.ID, "session_id", session, "err", err)
-				}
+			if !res.Prune {
+				surfaced = env.Type == wire.EventApprovalRequired
+				return
 			}
+			// 410 = 会话级 token 指向的卡已不在系统里。典型:锁屏按钮 end 了卡
+			// 而 Intent 侧不注销 token(只有 App 侧 end(snapshot) 报 la-tokens
+			// end),App 又挂起错过重报——relay 缓存的会话 token 成了死地址。
+			// 剪枝(end 同样生效,原逻辑保留)。
+			if err := d.cfg.Store.DeleteLAToken(device.ID, session); err != nil {
+				d.log.Warn("failed to delete stale LA token", "device_id", device.ID, "session_id", session, "err", err)
+			}
+			// approval_required 不能就此打住:update 打在死卡上等于什么都没
+			// 发,而路径一直接返回 true 会把 alert 也抑制掉——这条审批就
+			// 「无卡无通知」了(2026-11-20 真机:同会话连续审批,App 挂起窗内
+			// 锁屏按钮逐张 end 后,后续审批对手机完全不可见,直到 App 回前台
+			// 重报 token)。落 push-to-start 起卡;起不了(强退语义)返回
+			// false,alert 兜底。
+			if env.Type != wire.EventApprovalRequired || device.PushToStartToken == "" {
+				return
+			}
+			startRes := d.push(tier, cloudLAPushKind, device.ID, env, apns.Request{
+				DeviceToken: device.PushToStartToken,
+				Environment: device.APNSEnv,
+				Topic:       d.cfg.Pusher.LiveActivityTopic(),
+				PushType:    "liveactivity",
+				Priority:    priority,
+				Expiration:  now + liveActivityTTL,
+				Payload:     wire.CloudApprovalPushFor(env, now, true),
+			})
+			if startRes.Prune {
+				if err := d.cfg.Store.SetPushToStartToken(device.ID, "", now); err != nil {
+					d.log.Warn("failed to clear stale push-to-start token", "device_id", device.ID, "err", err)
+				}
+				return
+			}
+			surfaced = true
 		})
-		return env.Type == wire.EventApprovalRequired
+		return surfaced
 	}
 
 	// 路径二:设备级 push-to-start token(App 被杀时由 relay 起卡)。

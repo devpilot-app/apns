@@ -715,6 +715,63 @@ func TestPushToStartPruneOn410(t *testing.T) {
 	}
 }
 
+// TestCloudApprovalDeadSessionTokenFallsToPushToStart 会话级 token 已死
+// (410)时,approval_required 必须剪枝并落 push-to-start 起卡——update 打在
+// 死卡上等于什么都没发,若就此返回 true 还会抑制 alert,审批就「无卡无
+// 通知」(2026-11-20 真机:锁屏按钮 end 卡后 Intent 侧不注销 token,App
+// 挂起错过重报,同会话后续审批对手机完全不可见)。
+func TestCloudApprovalDeadSessionTokenFallsToPushToStart(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	if err := s.SetPushToStartToken(dev.ID, "pts-token", testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutLAToken(store.LAToken{
+		DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_1",
+		PushToken: "la-token", UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := s.Device(dev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakePusher{respond: func(req apns.Request) (apns.Result, error) {
+		if req.DeviceToken == "la-token" {
+			return apns.Result{Status: 410, Reason: "Unregistered", Prune: true}, nil
+		}
+		return apns.Result{Status: 200}, nil
+	}}
+	d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
+
+	d.Notify(context.Background(), dev, event(wire.EventApprovalRequired, "apv_1"))
+
+	waitFor(t, "push-to-start start push", func() bool {
+		for _, c := range f.snapshot() {
+			if p, ok := c.Payload.(wire.CloudApprovalPush); ok &&
+				c.DeviceToken == "pts-token" && p.APS.Event == "start" {
+				return true
+			}
+		}
+		return false
+	})
+	got, err := s.Device(dev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PushToStartToken != "pts-token" {
+		t.Fatalf("push-to-start token wrongly cleared: %q", got.PushToStartToken)
+	}
+	tokens, err := s.LATokensForDaemon(testDaemon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range tokens {
+		if tok.SessionID == "sess_1" && tok.PushToken == "la-token" {
+			t.Fatalf("dead session token not pruned: %+v", tok)
+		}
+	}
+}
+
 // TestCloudApprovalSessionTokenPreferred 会话级 token(App 前台起卡)优先于
 // push-to-start:approval_required 走 update(无 start 属性),close 走
 // end(dismissal-date = now+5)。
