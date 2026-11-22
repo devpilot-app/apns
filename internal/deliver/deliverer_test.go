@@ -861,3 +861,161 @@ func TestApprovalBodyBranches(t *testing.T) {
 		})
 	}
 }
+
+// putSessionPending 落一条同会话待决审批（ts 可区分到场先后）。
+func putSessionPending(t *testing.T, s *store.Store, approvalID string, ts int64) {
+	t.Helper()
+	env := event(wire.EventApprovalRequired, approvalID)
+	env.TS = ts
+	env.ExpiresAt = testNow + 1800
+	if err := s.PutPending(store.Pending{
+		ApprovalID: approvalID, DaemonID: testDaemon, Event: env,
+		Status: "pending", CreatedAt: ts, ExpiresAt: testNow + 1800,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// cloudCalls 过滤出云审批卡（CloudApprovalPush）的推送。
+func cloudCalls(t *testing.T, calls []apns.Request) []wire.CloudApprovalPush {
+	t.Helper()
+	var out []wire.CloudApprovalPush
+	for _, c := range calls {
+		if p, ok := c.Payload.(wire.CloudApprovalPush); ok {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TestApprovalRequiredCarriesSessionPendingCount 并行工具调用同秒多条审批：
+// approval_required 推送必须带同会话待决总数（2026-11-22 真机：两条 Read
+// 并行，锁屏只见到卡面那条，用户不知道还有第二条）。
+func TestApprovalRequiredCarriesSessionPendingCount(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	if err := s.PutLAToken(store.LAToken{
+		DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_1",
+		PushToken: "la-token", UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	putSessionPending(t, s, "apv_first", testNow)
+	putSessionPending(t, s, "apv_second", testNow+1)
+	f := &fakePusher{}
+	clock := &testClock{t: time.Unix(testNow+2, 0)}
+	d, _ := newDeliverer(t, s, f, clock, 0)
+
+	d.Notify(context.Background(), dev, event(wire.EventApprovalRequired, "apv_second"))
+	waitFor(t, "cloud push", func() bool { return len(cloudCalls(t, f.snapshot())) > 0 })
+
+	pushes := cloudCalls(t, f.snapshot())
+	last := pushes[len(pushes)-1]
+	if last.APS.Event != "update" {
+		t.Fatalf("会话 token 在场应为 update: %+v", last.APS)
+	}
+	if got := last.APS.ContentState.PendingCount; got != 2 {
+		t.Fatalf("PendingCount = %d, want 2（同会话两条待决）", got)
+	}
+}
+
+// TestCloseHandsOffFaceToNextPending 收场分流（2026-11-22 真机案核心）：
+// close 时同会话还有待决 → 推「下一条待决」的 update（卡面切过去并带计数），
+// 而不是 end 把整张卡收走——否则剩下的审批在锁屏零可见（alert 又被
+// 「卡面曾覆盖」抑制过），它的 hook 挂在终端等成「点了没反应」。
+func TestCloseHandsOffFaceToNextPending(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	if err := s.PutLAToken(store.LAToken{
+		DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_1",
+		PushToken: "la-token", UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	putSessionPending(t, s, "apv_hook", testNow)   // ② DevPilot-Hook/go.mod 位
+	putSessionPending(t, s, "apv_apns", testNow+1) // ③ DevPilot-APNS/go.mod 位
+	f := &fakePusher{}
+	clock := &testClock{t: time.Unix(testNow+2, 0)}
+	d, _ := newDeliverer(t, s, f, clock, 0)
+
+	// 用户批掉卡面那条（③），relay 收到它的 close——注意 store 里 ③ 仍
+	// pending（daemon 自发 close 路径不落标记），分流查询必须排除本条。
+	closeEnv := event(wire.EventApprovalClosed, "apv_apns")
+	closeEnv.Payload.StatusText = wire.CloseReasonApproved
+	d.Notify(context.Background(), dev, closeEnv)
+	waitFor(t, "cloud push", func() bool { return len(cloudCalls(t, f.snapshot())) > 0 })
+
+	pushes := cloudCalls(t, f.snapshot())
+	last := pushes[len(pushes)-1]
+	if last.APS.Event != "update" {
+		t.Fatalf("同会话仍有待决时 close 必须分流为 update, 不是 end: %+v", last.APS)
+	}
+	if got := last.APS.ContentState.ApprovalID; got != "apv_hook" {
+		t.Fatalf("卡面应切到下一条待决 apv_hook, 实际 %q", got)
+	}
+	if got := last.APS.ContentState.State; got != wire.CloudStateNeedsYou {
+		t.Fatalf("分流卡面应为 needsYou, 实际 %q", got)
+	}
+	if got := last.APS.ContentState.PendingCount; got != 0 {
+		t.Fatalf("剩余单条待决时计数 ≤1 应省略(omitempty), 实际 %d", got)
+	}
+}
+
+// TestCloseHandsOffKeepsCountWhenTwoRemain 收场分流后剩两条：计数必须为 2
+// （徽标继续提示「还有下一条」）。
+func TestCloseHandsOffKeepsCountWhenTwoRemain(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	if err := s.PutLAToken(store.LAToken{
+		DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_1",
+		PushToken: "la-token", UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	putSessionPending(t, s, "apv_a", testNow)
+	putSessionPending(t, s, "apv_b", testNow+1)
+	putSessionPending(t, s, "apv_c", testNow+2)
+	f := &fakePusher{}
+	clock := &testClock{t: time.Unix(testNow+3, 0)}
+	d, _ := newDeliverer(t, s, f, clock, 0)
+
+	closeEnv := event(wire.EventApprovalClosed, "apv_c")
+	closeEnv.Payload.StatusText = wire.CloseReasonDenied
+	d.Notify(context.Background(), dev, closeEnv)
+	waitFor(t, "cloud push", func() bool { return len(cloudCalls(t, f.snapshot())) > 0 })
+
+	pushes := cloudCalls(t, f.snapshot())
+	last := pushes[len(pushes)-1]
+	if last.APS.Event != "update" || last.APS.ContentState.ApprovalID != "apv_b" {
+		t.Fatalf("卡面应切到最新待决 apv_b: %+v", last.APS)
+	}
+	if got := last.APS.ContentState.PendingCount; got != 2 {
+		t.Fatalf("剩余两条待决计数应为 2, 实际 %d", got)
+	}
+}
+
+// TestCloseEndsCardWhenSessionDrained 全部收场：无待决时 close 走原 end
+// 语义（终态短暂停留后收卡），分流不得改变 drained 会话的收卡行为。
+func TestCloseEndsCardWhenSessionDrained(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	if err := s.PutLAToken(store.LAToken{
+		DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_1",
+		PushToken: "la-token", UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakePusher{}
+	clock := &testClock{t: time.Unix(testNow+3, 0)}
+	d, _ := newDeliverer(t, s, f, clock, 0)
+
+	closeEnv := event(wire.EventApprovalClosed, "apv_only")
+	closeEnv.Payload.StatusText = wire.CloseReasonApproved
+	d.Notify(context.Background(), dev, closeEnv)
+	waitFor(t, "cloud push", func() bool { return len(cloudCalls(t, f.snapshot())) > 0 })
+
+	pushes := cloudCalls(t, f.snapshot())
+	last := pushes[len(pushes)-1]
+	if last.APS.Event != "end" {
+		t.Fatalf("会话已无待决, close 必须仍为 end: %+v", last.APS)
+	}
+	if last.APS.DismissalDate <= last.APS.Timestamp {
+		t.Fatalf("end 推送应带 dismissal-date(now+5): %+v", last.APS)
+	}
+}

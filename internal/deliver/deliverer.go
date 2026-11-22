@@ -408,12 +408,50 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 		priority = 10
 	}
 
+	// —— 会话待决集合：卡面计数与收场分流共用（2026-11-22 真机案）——
+	//
+	// 计数：approval_required 推送带同会话待决总数（含本条），iOS 侧卡面
+	// 出「N pending」徽标——并行工具调用同秒多条审批时，用户批掉卡面
+	// 那条会以为全批完了，实际另一条的 hook 还挂在终端等。
+	//
+	// 收场分流：close 时同会话**还有**待决 → 不推 end（会把整张卡收走，
+	// 剩下的审批在锁屏零可见——它的 alert 当初又被「卡面曾覆盖」抑制过，
+	// 等于双重抹除），改推「下一条待决」的 update：卡面自动切到它并带
+	// 最新计数。查询排除本条 approval_id：daemon 自发 close 走 onEvent
+	// 常规路径，relay 侧 pending 标记未落地，不排除会选中刚收场的自己。
+	faceEnv := env
+	pendingCount := 0
+	switch env.Type {
+	case wire.EventApprovalRequired:
+		if pendings, err := d.cfg.Store.PendingForSession(env.DaemonID, env.SessionID, "", now); err != nil {
+			d.log.Warn("failed to list session pendings", "daemon_id", env.DaemonID, "session_id", env.SessionID, "err", err)
+		} else {
+			pendingCount = len(pendings)
+		}
+	case wire.EventApprovalClosed:
+		if rest, err := d.cfg.Store.PendingForSession(env.DaemonID, env.SessionID, env.ApprovalID, now); err != nil {
+			d.log.Warn("failed to list session pendings for close handoff", "daemon_id", env.DaemonID, "session_id", env.SessionID, "err", err)
+		} else if len(rest) > 0 {
+			faceEnv = rest[len(rest)-1].Event // ts 升序末位 = 最新到场
+			pendingCount = len(rest)
+		}
+	}
+	// CloudApprovalPushFor 按 env.Type 决定 update/end——faceEnv 已是
+	// approval_required 时自然生成 update + needsYou + 倒计时。
+	cloudPush := func(isStart bool) wire.CloudApprovalPush {
+		push := wire.CloudApprovalPushFor(faceEnv, now, isStart)
+		if pendingCount > 1 {
+			push.APS.ContentState.PendingCount = pendingCount
+		}
+		return push
+	}
+
 	// 路径一:会话级 token(App 前台起的卡)——update/end。
 	if sessionToken != "" {
 		token, session := sessionToken, env.SessionID
 		key := "cloud/" + device.ID + "/" + session
-		push := wire.CloudApprovalPushFor(env, now, false)
-		var surfaced bool   // 本次是否对该审批出了卡面推送(alert 抑制判据)
+		push := cloudPush(false)
+		var surfaced bool // 本次是否对该审批出了卡面推送(alert 抑制判据)
 		d.throttle.Do(key, func() {
 			res := d.push(tier, cloudLAPushKind, device.ID, env, apns.Request{
 				DeviceToken: token,
@@ -425,7 +463,7 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 				Payload:     push,
 			})
 			if !res.Prune {
-				surfaced = env.Type == wire.EventApprovalRequired
+				surfaced = faceEnv.Type == wire.EventApprovalRequired
 				return
 			}
 			// 410 = 会话级 token 指向的卡已不在系统里。典型:锁屏按钮 end 了卡
@@ -440,8 +478,9 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 			// 「无卡无通知」了(2026-11-20 真机:同会话连续审批,App 挂起窗内
 			// 锁屏按钮逐张 end 后,后续审批对手机完全不可见,直到 App 回前台
 			// 重报 token)。落 push-to-start 起卡;起不了(强退语义)返回
-			// false,alert 兜底。
-			if env.Type != wire.EventApprovalRequired || device.PushToStartToken == "" {
+			// false,alert 兜底。faceEnv 判定:收场分流后真正要送达的是
+			// 下一条待决(approval_required),同样要兜底起卡。
+			if faceEnv.Type != wire.EventApprovalRequired || device.PushToStartToken == "" {
 				return
 			}
 			startRes := d.push(tier, cloudLAPushKind, device.ID, env, apns.Request{
@@ -451,7 +490,7 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 				PushType:    "liveactivity",
 				Priority:    priority,
 				Expiration:  now + liveActivityTTL,
-				Payload:     wire.CloudApprovalPushFor(env, now, true),
+				Payload:     cloudPush(true),
 			})
 			if startRes.Prune {
 				if err := d.cfg.Store.SetPushToStartToken(device.ID, "", now); err != nil {
@@ -466,8 +505,9 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 
 	// 路径二:设备级 push-to-start token(App 被杀时由 relay 起卡)。
 	// 只对 approval_required 起卡;终局事件无卡可收(410 剪枝 token)。
-	if env.Type == wire.EventApprovalRequired && device.PushToStartToken != "" {
-		push := wire.CloudApprovalPushFor(env, now, true)
+	// faceEnv 判定同上:收场分流出来的「下一条待决」在此路径上起卡。
+	if faceEnv.Type == wire.EventApprovalRequired && device.PushToStartToken != "" {
+		push := cloudPush(true)
 		res := d.push(tier, cloudLAPushKind, device.ID, env, apns.Request{
 			DeviceToken: device.PushToStartToken,
 			Environment: device.APNSEnv,

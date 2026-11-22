@@ -328,3 +328,34 @@ func TestPayloadTmuxWindowOmitEmpty(t *testing.T) {
 		t.Fatalf("往返丢失 TmuxWindow: %v %q", err, back.Payload.TmuxWindow)
 	}
 }
+
+// TestCloudApprovalPendingCountOmission 固化 pendingCount 的 wire 形状
+// （2026-11-22 并行双审批案）：≤1 整键不发（旧 App 解码回落 1，双向
+// 兼容），>1 必须发 camelCase 键——iOS 端 ContentState 按键名解码，漂移
+// 表现为锁屏徽标静默不出现。
+func TestCloudApprovalPendingCountOmission(t *testing.T) {
+	base := Envelope{
+		Type: EventApprovalRequired, ApprovalID: "apv_x",
+		DaemonID: "dd_1", SessionID: "sess_1", Agent: AgentClaude,
+		ExpiresAt: 1000, TS: 100,
+		Payload: Payload{SessionTitle: "Fix build", ToolName: "Read"},
+	}
+	single := CloudApprovalPushFor(base, 200, false)
+	blob, err := json.Marshal(single)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "pendingCount") {
+		t.Fatalf("单条待决不得发 pendingCount 键(旧 App 回落 1): %s", blob)
+	}
+
+	multi := CloudApprovalPushFor(base, 200, false)
+	multi.APS.ContentState.PendingCount = 3
+	blob, err = json.Marshal(multi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(blob), `"pendingCount":3`) {
+		t.Fatalf("多待决必须发 pendingCount 键: %s", blob)
+	}
+}

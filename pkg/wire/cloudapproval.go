@@ -38,7 +38,13 @@ type CloudApprovalState struct {
 	State   string   `json:"state"`
 	// ExpiresAt 是倒计时终点（Unix 秒）；仅 needsYou 态有意义。
 	ExpiresAt int64 `json:"expiresAt,omitempty"`
-	UpdatedAt int64 `json:"updatedAt"`
+	// PendingCount 是同会话待决审批总数（含本条）。并行工具调用会在同一秒
+	// 产生多条审批，而手机端一会话只一张卡——iOS 侧据此在卡面出徽标提示
+	// 「批完这条还有下一条」（2026-11-22 真机：批掉卡面那条后另一条在
+	// 锁屏零可见，Claude Code 等它 7 分钟「没反应」）。omitempty：≤1 不
+	// 发键，旧 App 解码回落 1，新 App 对旧 relay 同样回落，双向兼容。
+	PendingCount int   `json:"pendingCount,omitempty"`
+	UpdatedAt    int64 `json:"updatedAt"`
 }
 
 // CloudApprovalAlert 是 start 事件必需的 alert 体。
@@ -57,8 +63,8 @@ type CloudApprovalAPS struct {
 	Timestamp      int64               `json:"timestamp"`
 	Event          string              `json:"event"` // start|update|end
 	ContentState   CloudApprovalState  `json:"content-state"`
-	Alert          *CloudApprovalAlert `json:"alert,omitempty"`          // 仅 start 必需
-	Attributes     map[string]any      `json:"attributes,omitempty"`     // 仅 push-to-start 的 start 事件需要
+	Alert          *CloudApprovalAlert `json:"alert,omitempty"`           // 仅 start 必需
+	Attributes     map[string]any      `json:"attributes,omitempty"`      // 仅 push-to-start 的 start 事件需要
 	AttributesType string              `json:"attributes-type,omitempty"` // 同上，= CloudApprovalAttributesType
 	StaleDate      int64               `json:"stale-date,omitempty"`
 	DismissalDate  int64               `json:"dismissal-date,omitempty"`

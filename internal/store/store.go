@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -128,19 +129,19 @@ type Device struct {
 
 // Pending 是一次待审批（或已决策待投递）的审批。
 type Pending struct {
-	ApprovalID   string        `json:"approval_id"`
-	DaemonID     string        `json:"daemon_id"`
-	Event        wire.Envelope `json:"event"`
-	Status       string        `json:"status"` // pending / approved / denied / expired / cancelled
-	Decision     string        `json:"decision,omitempty"`
+	ApprovalID string        `json:"approval_id"`
+	DaemonID   string        `json:"daemon_id"`
+	Event      wire.Envelope `json:"event"`
+	Status     string        `json:"status"` // pending / approved / denied / expired / cancelled
+	Decision   string        `json:"decision,omitempty"`
 	// Choice 是选项型审批所选的候选标签（wire.Decision.Choice 透传落库），
 	// 重连补发时随 Decision 一并回放。v0.4.3 增量字段；旧档缺键回落空串。
-	Choice       string        `json:"choice,omitempty"`
-	CreatedAt    int64         `json:"created_at"`
-	ExpiresAt    int64         `json:"expires_at"`
-	DecidedAt    int64         `json:"decided_at,omitempty"`
-	DeliverUntil int64         `json:"deliver_until,omitempty"`
-	Delivered    bool          `json:"delivered,omitempty"`
+	Choice       string `json:"choice,omitempty"`
+	CreatedAt    int64  `json:"created_at"`
+	ExpiresAt    int64  `json:"expires_at"`
+	DecidedAt    int64  `json:"decided_at,omitempty"`
+	DeliverUntil int64  `json:"deliver_until,omitempty"`
+	Delivered    bool   `json:"delivered,omitempty"`
 }
 
 // LAToken 是某个 (device, session) 的 Live Activity push token。
@@ -764,6 +765,32 @@ func (s *Store) PendingForDaemon(daemonID string, now int64) ([]Pending, error) 
 			return nil
 		})
 	})
+	return out, err
+}
+
+// PendingForSession 返回指定会话（同 daemon）仍在等待中的审批，按事件 ts
+// 升序（卡面取最新在场者即末位）。excludeApprovalID 排除某条（收场分流
+// 场景排除刚 close 的本条：daemon 自发 close 走 onEvent 常规路径，relay
+// 不会把它的 pending 标记落地——不排除就会把刚收场的审批又数进去、甚至
+// 选成下一条卡面，2026-11-22 真机案的撒谎卡形态）。
+func (s *Store) PendingForSession(daemonID, sessionID, excludeApprovalID string, now int64) ([]Pending, error) {
+	var out []Pending
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketPending).ForEach(func(_, v []byte) error {
+			var p Pending
+			if err := json.Unmarshal(v, &p); err != nil {
+				return err
+			}
+			if p.DaemonID != daemonID || p.ApprovalID == excludeApprovalID ||
+				p.Event.SessionID != sessionID ||
+				p.Status != "pending" || now > p.ExpiresAt {
+				return nil
+			}
+			out = append(out, p)
+			return nil
+		})
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Event.TS < out[j].Event.TS })
 	return out, err
 }
 
