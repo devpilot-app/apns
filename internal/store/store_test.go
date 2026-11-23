@@ -51,7 +51,7 @@ func pairDeviceTier(t *testing.T, s *Store, code string, tier Tier) (Daemon, Dev
 		t.Fatal(err)
 	}
 	d := Device{ID: pairing.NewDeviceID(), CredHash: pairing.SecretHash(secret), Name: "iPhone"}
-	daemon, device, err := s.Pair(pairing.CodeHash(code), d, tier, testNow)
+	daemon, device, err := s.Pair(pairing.CodeHash(code), d, tier, testNow, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestPairingFlow(t *testing.T) {
 	}
 
 	// 配对码一次性。
-	if _, _, err := s.Pair(pairing.CodeHash(code), device, TierFree, testNow); err != ErrCodeInvalid {
+	if _, _, err := s.Pair(pairing.CodeHash(code), device, TierFree, testNow, false); err != ErrCodeInvalid {
 		t.Fatalf("reused pairing code err = %v", err)
 	}
 }
@@ -88,7 +88,7 @@ func TestPairingExpired(t *testing.T) {
 	s := newStore(t)
 	code := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	seedPairing(t, s, code, "dd_0123456789abcdef0123456789abcdef")
-	if _, _, err := s.Pair(pairing.CodeHash(code), Device{ID: "dv_x", CredHash: "h"}, TierFree, testNow+901); err != ErrCodeExpired {
+	if _, _, err := s.Pair(pairing.CodeHash(code), Device{ID: "dv_x", CredHash: "h"}, TierFree, testNow+901, false); err != ErrCodeExpired {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -718,7 +718,7 @@ func TestPairSupersedesForeignDeviceSameToken(t *testing.T) {
 	}
 	old := Device{ID: pairing.NewDeviceID(), CredHash: pairing.SecretHash(secretA),
 		Name: "iPhone", APNSToken: "tok-iphone"}
-	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), old, TierFree, testNow); err != nil {
+	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), old, TierFree, testNow, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -730,7 +730,7 @@ func TestPairSupersedesForeignDeviceSameToken(t *testing.T) {
 	}
 	fresh := Device{ID: pairing.NewDeviceID(), CredHash: pairing.SecretHash(secretB),
 		Name: "iPhone", APNSToken: "tok-iphone"}
-	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUV"), fresh, TierFree, testNow); err != nil {
+	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUV"), fresh, TierFree, testNow, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -754,7 +754,7 @@ func TestPairKeepsOtherTokens(t *testing.T) {
 	secretA, _ := pairing.NewSecret()
 	other := Device{ID: pairing.NewDeviceID(), CredHash: pairing.SecretHash(secretA),
 		Name: "iPad", APNSToken: "tok-ipad"}
-	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), other, TierFree, testNow); err != nil {
+	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), other, TierFree, testNow, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -763,10 +763,93 @@ func TestPairKeepsOtherTokens(t *testing.T) {
 	secretB, _ := pairing.NewSecret()
 	fresh := Device{ID: pairing.NewDeviceID(), CredHash: pairing.SecretHash(secretB),
 		Name: "iPhone", APNSToken: "tok-iphone"}
-	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUV"), fresh, TierFree, testNow); err != nil {
+	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUV"), fresh, TierFree, testNow, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := s.VerifyDevice(other.ID, secretA); !ok {
 		t.Fatal("device with different token must survive pairing of another phone")
+	}
+}
+
+// TestPairKeepsOtherDaemonsWhenRequested 多主机支持:keepOtherDaemons=true 时,
+// 同一台手机(同 token)配到 daemon B 不得驱逐 daemon A 名下的设备行——
+// 同一部 iPhone 同时绑定两台开发机是合法稳态(2026-11-23 多主机方案)。
+func TestPairKeepsOtherDaemonsWhenRequested(t *testing.T) {
+	s := newStore(t)
+	daemonA := "dd_0123456789abcdef0123456789abcdef"
+	daemonB := "dd_ffffffffffffffffffffffffffffffff"
+
+	seedPairing(t, s, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", daemonA)
+	secretA, err := pairing.NewSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := Device{ID: pairing.NewDeviceID(), CredHash: pairing.SecretHash(secretA),
+		Name: "iPhone", APNSToken: "tok-iphone"}
+	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), first, TierFree, testNow, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// 同一部手机(同 token)再配 daemon B,keep=true
+	seedPairing(t, s, "ABCDEFGHIJKLMNOPQRSTUV", daemonB)
+	secretB, err := pairing.NewSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := Device{ID: pairing.NewDeviceID(), CredHash: pairing.SecretHash(secretB),
+		Name: "iPhone", APNSToken: "tok-iphone"}
+	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUV"), second, TierFree, testNow, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// daemon A 名下的行完好(凭据仍可验证);两行并存。
+	if _, ok := s.VerifyDevice(first.ID, secretA); !ok {
+		t.Fatal("keep_other_daemons must not evict the other daemon's device row")
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if _, err := s.Device(id); err != nil {
+			t.Fatalf("device row %s missing: %v", id, err)
+		}
+	}
+}
+
+// TestPairKeepFlagStillSupersedesSameDaemon keep=true 不豁免同 daemon 驱逐:
+// 一台开发机只绑一台现役手机(1 host → 1 device 不变量),旧行级联清 LA token。
+func TestPairKeepFlagStillSupersedesSameDaemon(t *testing.T) {
+	s := newStore(t)
+	daemonID := "dd_0123456789abcdef0123456789abcdef"
+
+	seedPairing(t, s, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", daemonID)
+	secretA, err := pairing.NewSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := Device{ID: pairing.NewDeviceID(), CredHash: pairing.SecretHash(secretA),
+		Name: "iPhone", APNSToken: "tok-iphone"}
+	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), old, TierFree, testNow, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutLAToken(LAToken{DeviceID: old.ID, DaemonID: daemonID,
+		SessionID: "sess_keep", PushToken: "tok", UpdatedAt: testNow}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 同 daemon 重配对(凭据轮换),keep=true
+	seedPairing(t, s, "ABCDEFGHIJKLMNOPQRSTUV", daemonID)
+	secretB, err := pairing.NewSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := Device{ID: pairing.NewDeviceID(), CredHash: pairing.SecretHash(secretB),
+		Name: "iPhone", APNSToken: "tok-iphone"}
+	if _, _, err := s.Pair(pairing.CodeHash("ABCDEFGHIJKLMNOPQRSTUV"), fresh, TierFree, testNow, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Device(old.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("same-daemon re-pair must evict the old row even with keep=true, err = %v", err)
+	}
+	if _, ok := s.VerifyDevice(fresh.ID, secretB); !ok {
+		t.Fatal("fresh device row must verify")
 	}
 }

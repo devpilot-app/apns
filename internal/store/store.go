@@ -330,7 +330,12 @@ func (s *Store) VerifyDaemon(id, secret string) (Daemon, bool) {
 //
 // 同时把 App 提交的档位写入 daemon（配额分层的事实源）；
 // 同一 daemon 只保留一台 device（重新配对会顶掉旧设备）。
-func (s *Store) Pair(codeHash string, device Device, tier Tier, now int64) (Daemon, Device, error) {
+// Pair 消费配对码并落设备行。
+// keepOtherDaemons=false 维持旧行为:配对前驱逐「其它 daemon 名下同 APNs token」
+// 的设备行(单配对时代的换绑机语义,防旧 App 凭据被覆盖后旧机器照发幽灵横幅);
+// true 时保留——同一台手机同时绑定多台开发机(多主机支持)。无论取值,
+// 同 DaemonID 的旧设备行驱逐无条件保留:一台开发机只绑一台现役手机。
+func (s *Store) Pair(codeHash string, device Device, tier Tier, now int64, keepOtherDaemons bool) (Daemon, Device, error) {
 	var daemon Daemon
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		codes := tx.Bucket(bucketCodes)
@@ -371,7 +376,9 @@ func (s *Store) Pair(codeHash string, device Device, tier Tier, now int64) (Daem
 			// 那个还揣着同款 APNs token 的设备行必须一并清掉——否则旧机器的
 			// 审批照发横幅,而 App 凭据已被新配对覆盖,永远点不进也回放不到
 			// (幽灵横幅)。空 token 不扫(pair 请求没带 token 时无从比对)。
-			if device.APNSToken != "" && d.APNSToken == device.APNSToken &&
+			// keepOtherDaemons=true(多主机配对)跳过:App 凭据按 daemon 分槽,
+			// 不存在「被新配对覆盖」的问题,旧行是合法的多主机绑定。
+			if !keepOtherDaemons && device.APNSToken != "" && d.APNSToken == device.APNSToken &&
 				string(k) != device.ID {
 				stale = append(stale, bytes.Clone(k))
 			}

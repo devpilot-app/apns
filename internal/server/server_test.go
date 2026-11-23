@@ -1204,3 +1204,60 @@ func TestAPNSEnvPerDevice(t *testing.T) {
 		t.Fatalf("missing env should preserve: %+v", dev)
 	}
 }
+
+// TestPairKeepOtherDaemonsFlag 多主机支持:/v1/pair 缺省不带 keep_other_daemons
+// 时维持存量换绑机语义(跨 daemon 同 token 行驱逐——旧 App 兼容回归钉);
+// 显式 true 时保留,同一台手机可同时绑定多台开发机。
+func TestPairKeepOtherDaemonsFlag(t *testing.T) {
+	env := newTestEnv(t)
+	pairWithToken := func(code, daemonID, token string, keep bool) string {
+		t.Helper()
+		resp, body := env.post(t, "/v1/pairing/sessions", map[string]any{
+			"code": code, "daemon_id": daemonID,
+			"daemon_cred_hash": pairing.SecretHash(testSecret),
+			"daemon_name":      "machine",
+			"expires_at":       time.Now().Add(10 * time.Minute).Unix(),
+		}, pairing.DaemonCredential(daemonID, testSecret))
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("register session HTTP %d: %s", resp.StatusCode, body)
+		}
+		req := map[string]any{"code": code, "apns_token": token, "device_name": "iPhone"}
+		if keep {
+			req["keep_other_daemons"] = true
+		}
+		resp, body = env.post(t, "/v1/pair", req, "")
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("pair HTTP %d: %s", resp.StatusCode, body)
+		}
+		var paired struct {
+			DeviceID string `json:"device_id"`
+		}
+		if err := json.Unmarshal(body, &paired); err != nil {
+			t.Fatal(err)
+		}
+		return paired.DeviceID
+	}
+
+	daemonA := "dd_0123456789abcdef0123456789abcdef"
+	daemonB := "dd_fedcba9876543210fedcba9876543210"
+	daemonC := "dd_11111111111111111111111111111111"
+
+	// 缺省路径:同 token 配到 daemon B,daemon A 的行被驱逐(存量语义)。
+	idA := pairWithToken("ABCDEFGHIJKLMNOPQRSTUVWXYZ", daemonA, "tok-iphone", false)
+	idB := pairWithToken("ABCDEFGHIJKLMNOPQRSTUV", daemonB, "tok-iphone", false)
+	if _, err := env.store.Device(idA); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("default pair must evict cross-daemon same-token row, err = %v", err)
+	}
+	if _, err := env.store.Device(idB); err != nil {
+		t.Fatalf("new device row missing: %v", err)
+	}
+
+	// keep=true:同 token 配到 daemon C,daemon B 的行保留(多主机绑定)。
+	idC := pairWithToken("ZYXWVUTSRQPONMLKJIHGFEDCBA", daemonC, "tok-iphone", true)
+	if _, err := env.store.Device(idB); err != nil {
+		t.Fatalf("keep_other_daemons=true must keep the other daemon's row: %v", err)
+	}
+	if _, err := env.store.Device(idC); err != nil {
+		t.Fatalf("new device row missing: %v", err)
+	}
+}

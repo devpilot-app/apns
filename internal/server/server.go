@@ -198,6 +198,11 @@ type pairRequest struct {
 	// ProJWS Apple 签名的 StoreKit 2 交易凭证(ProStore.currentEntitlements
 	// 的 jwsRepresentation)。仅 ENFORCE_PRO_TIER 部署消费,自建忽略。
 	ProJWS string `json:"pro_jws,omitempty"`
+	// KeepOtherDaemons 多主机支持(v0.4.16):true 时保留「其它 daemon 名下同
+	// APNs token」的设备行,让同一台手机同时绑定多台开发机。缺席(false)=旧行为
+	// (驱逐,换绑机防幽灵横幅)——不能用 replace+默认 true:Go 零值陷阱会把旧 App
+	// 的缺席请求解码成 false 之外的语义反转,这里缺席必须严格等于存量行为。
+	KeepOtherDaemons bool `json:"keep_other_daemons,omitempty"`
 }
 
 func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +250,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		APNSEnv:   apnsEnv,
 		Name:      name,
 	}
-	daemon, _, err := s.cfg.Store.Pair(pairing.CodeHash(canonicalCode(req.Code)), device, tier, now)
+	daemon, _, err := s.cfg.Store.Pair(pairing.CodeHash(canonicalCode(req.Code)), device, tier, now, req.KeepOtherDaemons)
 	switch {
 	case errors.Is(err, store.ErrCodeExpired):
 		writeError(w, http.StatusGone, "pairing code expired")

@@ -70,7 +70,7 @@ func setupStore(t *testing.T, apnsToken string) (*store.Store, store.Device) {
 		ID: "dv_0123456789abcdef", CredHash: pairing.SecretHash(strings.Repeat("s", 32)),
 		APNSToken: apnsToken, Name: "iPhone",
 	}
-	if _, _, err := s.Pair(pairing.CodeHash(testCode), dev, store.TierFree, testNow); err != nil {
+	if _, _, err := s.Pair(pairing.CodeHash(testCode), dev, store.TierFree, testNow, false); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.Device(dev.ID)
