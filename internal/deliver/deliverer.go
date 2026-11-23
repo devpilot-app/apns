@@ -451,8 +451,18 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 		token, session := sessionToken, env.SessionID
 		key := "cloud/" + device.ID + "/" + session
 		push := cloudPush(false)
-		var surfaced bool // 本次是否对该审批出了卡面推送(alert 抑制判据)
+		// 出卡裁决(alert 抑制判据)经 channel 回传:闭包在节流 goroutine 上
+		// 执行(Throttler 首次调用也是异步),旧实现直接 return 捕获变量是
+		// 数据竞争(CI -race 实锤,2026-11-23 定位),且读值是掷硬币——首跑
+		// 真值常被读丢,卡面已出而 alert 照发(2026-11-11「卡+通知重复」的
+		// 隐性放大器)。verdict 在闭包出口单点送出(channel 手递=happens-
+		// before),调用方带界等待:首跑亚毫秒拿到真值;闭包被 latest-wins
+		// 挤掉(同会话更前辈换)则超时回落 false → alert 照发,与既往
+		// 主导行为一致(被挤掉的卡面本就由最新调用代理)。
+		surfacedCh := make(chan bool, 1)
+		verdict := false
 		d.throttle.Do(key, func() {
+			defer func() { surfacedCh <- verdict }()
 			res := d.push(tier, cloudLAPushKind, device.ID, env, apns.Request{
 				DeviceToken: token,
 				Environment: device.APNSEnv,
@@ -463,7 +473,7 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 				Payload:     push,
 			})
 			if !res.Prune {
-				surfaced = faceEnv.Type == wire.EventApprovalRequired
+				verdict = faceEnv.Type == wire.EventApprovalRequired
 				return
 			}
 			// 410 = 会话级 token 指向的卡已不在系统里。典型:锁屏按钮 end 了卡
@@ -477,8 +487,8 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 			// 发,而路径一直接返回 true 会把 alert 也抑制掉——这条审批就
 			// 「无卡无通知」了(2026-11-20 真机:同会话连续审批,App 挂起窗内
 			// 锁屏按钮逐张 end 后,后续审批对手机完全不可见,直到 App 回前台
-			// 重报 token)。落 push-to-start 起卡;起不了(强退语义)返回
-			// false,alert 兜底。faceEnv 判定:收场分流后真正要送达的是
+			// 重报 token)。落 push-to-start 起卡;起不了(强退语义)裁决 false,
+			// alert 兜底。faceEnv 判定:收场分流后真正要送达的是
 			// 下一条待决(approval_required),同样要兜底起卡。
 			if faceEnv.Type != wire.EventApprovalRequired || device.PushToStartToken == "" {
 				return
@@ -498,9 +508,16 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 				}
 				return
 			}
-			surfaced = true
+			verdict = true
 		})
-		return surfaced
+		select {
+		case surfaced := <-surfacedCh:
+			return surfaced
+		case <-time.After(d.cfg.Throttle + 100*time.Millisecond):
+			// 本闭包被同 key 更新调用替换、不再执行:裁决回落 false,
+			// alert 照发(卡面由最新调用负责)。
+			return false
+		}
 	}
 
 	// 路径二:设备级 push-to-start token(App 被杀时由 relay 起卡)。
