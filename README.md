@@ -27,8 +27,8 @@ Design rules: a timeout anywhere in the approval chain falls back to the termina
 ## Quick start (deploy)
 
 ```bash
-git clone https://github.com/twotwoba/DevPilot-APNS.git
-cd DevPilot-APNS/deploy
+git clone https://github.com/devpilot-app/apns.git
+cd apns/deploy
 cp .env.example .env && chmod 600 .env   # fill in DOMAIN / APNS_KEY_ID / APNS_TEAM_ID / METRICS_TOKEN
 mkdir -p secrets && chmod 700 secrets
 cp ~/Downloads/AuthKey_XXXX.p8 secrets/apns.p8 && chmod 600 secrets/apns.p8
@@ -75,7 +75,7 @@ The APNs client can run the delivery path without a `.p8` via `APNS_MOCK=1`; uni
 
 `git tag v0.1.0 && git push origin v0.1.0` triggers:
 
-- `.github/workflows/docker.yml`: builds and pushes `ghcr.io/twotwoba/devpilot-relay`;
+- `.github/workflows/docker.yml`: builds and pushes `ghcr.io/devpilot-app/devpilot-relay`;
 - DevPilot-Hook's release depends on this repo's tag (`pkg/wire` is its module dependency),
   so **this repo must be released before Hook**.
 

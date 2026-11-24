@@ -24,8 +24,8 @@ connection, and scaling out requires a shared routing layer first.
 ## 2. Configuration
 
 ```bash
-git clone https://github.com/twotwoba/DevPilot-APNS.git
-cd DevPilot-APNS/deploy
+git clone https://github.com/devpilot-app/apns.git
+cd apns/deploy
 cp .env.example .env && chmod 600 .env
 mkdir -p secrets && chmod 700 secrets
 # Copy the downloaded AuthKey_XXXX.p8 to secrets/apns.p8
@@ -80,7 +80,7 @@ then connect to `/ws/app` and `/ws/daemon` respectively; you can watch
 ## 5. Upgrades
 
 ```bash
-cd DevPilot-APNS/deploy
+cd apns/deploy
 docker compose pull && docker compose up -d
 ```
 

@@ -22,7 +22,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 # 许可证随镜像分发：FSL-1.1-ALv2 要求再分发时携带条款。
 LABEL org.opencontainers.image.licenses="FSL-1.1-ALv2" \
-      org.opencontainers.image.source="https://github.com/twotwoba/DevPilot-APNS"
+      org.opencontainers.image.source="https://github.com/devpilot-app/apns"
 COPY --from=build /src/LICENSE.md /licenses/LICENSE.md
 
 COPY --from=build /out/devpilot-relay /usr/local/bin/devpilot-relay
