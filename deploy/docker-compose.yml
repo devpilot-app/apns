@@ -4,12 +4,12 @@
 #   mkdir -p secrets && cp ~/AuthKey_XXXX.p8 secrets/apns.p8 && chmod 600 secrets/apns.p8
 #   docker compose pull && docker compose up -d
 #
-# 镜像从 GHCR 拉取（0.4 浮动 tag 随 v0.4.x patch 发版更新；minor 升级需改此行）。
+# 镜像从 GHCR 拉取（0.5 浮动 tag 随 v0.5.x patch 发版更新；minor 升级需改此行）。
 # Caddy 负责 TLS 与 WSS 反代；relay 只监听容器内网 8080，不暴露到公网。
 
 services:
   relay:
-    image: ghcr.io/devpilot-app/devpilot-relay:0.4
+    image: ghcr.io/devpilot-app/devpilot-relay:0.5
     container_name: devpilot-relay
     restart: unless-stopped
     env_file:

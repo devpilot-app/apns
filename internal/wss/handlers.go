@@ -4,9 +4,9 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/twotwoba/DevPilot-APNS/internal/id"
-	"github.com/twotwoba/DevPilot-APNS/internal/store"
-	"github.com/twotwoba/DevPilot-APNS/pkg/wire"
+	"github.com/devpilot-app/apns/internal/id"
+	"github.com/devpilot-app/apns/internal/store"
+	"github.com/devpilot-app/apns/pkg/wire"
 )
 
 // onEvent 处理 daemon 上行事件：分配 seq、落库、路由、回 ack。

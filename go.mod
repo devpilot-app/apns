@@ -1,4 +1,4 @@
-module github.com/twotwoba/DevPilot-APNS
+module github.com/devpilot-app/apns
 
 go 1.24
 

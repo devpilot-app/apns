@@ -11,8 +11,8 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/twotwoba/DevPilot-APNS/internal/pairing"
-	"github.com/twotwoba/DevPilot-APNS/pkg/wire"
+	"github.com/devpilot-app/apns/internal/pairing"
+	"github.com/devpilot-app/apns/pkg/wire"
 )
 
 func newStore(t *testing.T) *Store {

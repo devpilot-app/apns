@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/twotwoba/DevPilot-APNS/internal/store"
-	"github.com/twotwoba/DevPilot-APNS/pkg/wire"
+	"github.com/devpilot-app/apns/internal/store"
+	"github.com/devpilot-app/apns/pkg/wire"
 )
 
 // testClock 单线程测试用的假时钟。

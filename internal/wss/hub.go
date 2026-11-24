@@ -10,11 +10,11 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/twotwoba/DevPilot-APNS/internal/id"
-	"github.com/twotwoba/DevPilot-APNS/internal/metrics"
-	"github.com/twotwoba/DevPilot-APNS/internal/quota"
-	"github.com/twotwoba/DevPilot-APNS/internal/store"
-	"github.com/twotwoba/DevPilot-APNS/pkg/wire"
+	"github.com/devpilot-app/apns/internal/id"
+	"github.com/devpilot-app/apns/internal/metrics"
+	"github.com/devpilot-app/apns/internal/quota"
+	"github.com/devpilot-app/apns/internal/store"
+	"github.com/devpilot-app/apns/pkg/wire"
 )
 
 const (

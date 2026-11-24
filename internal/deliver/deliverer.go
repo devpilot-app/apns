@@ -23,11 +23,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/twotwoba/DevPilot-APNS/internal/apns"
-	"github.com/twotwoba/DevPilot-APNS/internal/metrics"
-	"github.com/twotwoba/DevPilot-APNS/internal/quota"
-	"github.com/twotwoba/DevPilot-APNS/internal/store"
-	"github.com/twotwoba/DevPilot-APNS/pkg/wire"
+	"github.com/devpilot-app/apns/internal/apns"
+	"github.com/devpilot-app/apns/internal/metrics"
+	"github.com/devpilot-app/apns/internal/quota"
+	"github.com/devpilot-app/apns/internal/store"
+	"github.com/devpilot-app/apns/pkg/wire"
 )
 
 // 投递超时与节流参数。

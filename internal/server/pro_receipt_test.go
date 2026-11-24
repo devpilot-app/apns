@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/twotwoba/DevPilot-APNS/internal/pairing"
-	"github.com/twotwoba/DevPilot-APNS/internal/proentitlement"
-	"github.com/twotwoba/DevPilot-APNS/internal/store"
+	"github.com/devpilot-app/apns/internal/pairing"
+	"github.com/devpilot-app/apns/internal/proentitlement"
+	"github.com/devpilot-app/apns/internal/store"
 )
 
 // buildProFixture 自签 root+leaf 两级链,返回锚定该根的验证器与有效凭证工厂。

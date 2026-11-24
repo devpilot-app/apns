@@ -22,17 +22,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/twotwoba/DevPilot-APNS/internal/apns"
-	"github.com/twotwoba/DevPilot-APNS/internal/config"
-	"github.com/twotwoba/DevPilot-APNS/internal/deliver"
-	"github.com/twotwoba/DevPilot-APNS/internal/metrics"
-	"github.com/twotwoba/DevPilot-APNS/internal/proentitlement"
-	"github.com/twotwoba/DevPilot-APNS/internal/quota"
-	"github.com/twotwoba/DevPilot-APNS/internal/ratelimit"
-	"github.com/twotwoba/DevPilot-APNS/internal/server"
-	"github.com/twotwoba/DevPilot-APNS/internal/store"
-	"github.com/twotwoba/DevPilot-APNS/internal/wss"
-	"github.com/twotwoba/DevPilot-APNS/pkg/wire"
+	"github.com/devpilot-app/apns/internal/apns"
+	"github.com/devpilot-app/apns/internal/config"
+	"github.com/devpilot-app/apns/internal/deliver"
+	"github.com/devpilot-app/apns/internal/metrics"
+	"github.com/devpilot-app/apns/internal/proentitlement"
+	"github.com/devpilot-app/apns/internal/quota"
+	"github.com/devpilot-app/apns/internal/ratelimit"
+	"github.com/devpilot-app/apns/internal/server"
+	"github.com/devpilot-app/apns/internal/store"
+	"github.com/devpilot-app/apns/internal/wss"
+	"github.com/devpilot-app/apns/pkg/wire"
 )
 
 // Version 由 goreleaser 注入。

@@ -12,9 +12,9 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/twotwoba/DevPilot-APNS/internal/metrics"
-	"github.com/twotwoba/DevPilot-APNS/internal/store"
-	"github.com/twotwoba/DevPilot-APNS/internal/wss"
+	"github.com/devpilot-app/apns/internal/metrics"
+	"github.com/devpilot-app/apns/internal/store"
+	"github.com/devpilot-app/apns/internal/wss"
 )
 
 // TestSnapshotDisabledWithoutToken METRICS_TOKEN 未设时端点整体禁用:

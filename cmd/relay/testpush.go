@@ -15,9 +15,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/twotwoba/DevPilot-APNS/internal/id"
-	"github.com/twotwoba/DevPilot-APNS/internal/pairing"
-	"github.com/twotwoba/DevPilot-APNS/pkg/wire"
+	"github.com/devpilot-app/apns/internal/id"
+	"github.com/devpilot-app/apns/internal/pairing"
+	"github.com/devpilot-app/apns/pkg/wire"
 )
 
 func runTestPush(args []string) int {
