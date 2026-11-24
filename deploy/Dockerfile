@@ -20,6 +20,11 @@ RUN GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath -ldflags="-s -w 
 # distroless 无 shell，HEALTHCHECK 使用二进制自带的 healthcheck 子命令。
 FROM gcr.io/distroless/static-debian12:nonroot
 
+# 许可证随镜像分发：FSL-1.1-ALv2 要求再分发时携带条款。
+LABEL org.opencontainers.image.licenses="FSL-1.1-ALv2" \
+      org.opencontainers.image.source="https://github.com/twotwoba/DevPilot-APNS"
+COPY --from=build /src/LICENSE.md /licenses/LICENSE.md
+
 COPY --from=build /out/devpilot-relay /usr/local/bin/devpilot-relay
 # 预创建 /data 并交给 nonroot：命名卷首次挂载会继承该目录的属主。
 COPY --from=build --chown=nonroot:nonroot /empty /data
