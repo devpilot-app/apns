@@ -144,13 +144,21 @@ type Pending struct {
 	Delivered    bool   `json:"delivered,omitempty"`
 }
 
-// LAToken 是某个 (device, session) 的 Live Activity push token。
+// LAToken 是一台设备上某个 Live Activity 的 push token。
+//
+// 两种寻址方式并存（按 ApprovalID 是否为空分流，键空间互不相交）：
+//   - ApprovalID 为空：旧版 App 的会话级 token（一会话一卡），键
+//     device/session，同一会话的新 token 覆盖旧 token；
+//   - ApprovalID 非空：新版 App 的一审批一卡 token，键
+//     device/@approval/approval，只用于给这一条审批发收场 end 推送。
 type LAToken struct {
 	DeviceID  string `json:"device_id"`
 	DaemonID  string `json:"daemon_id"`
 	SessionID string `json:"session_id"`
-	PushToken string `json:"push_token"`
-	UpdatedAt int64  `json:"updated_at"`
+	// ApprovalID 非空 = 该 token 属于这一条审批自己的卡（一审批一卡）。
+	ApprovalID string `json:"approval_id,omitempty"`
+	PushToken  string `json:"push_token"`
+	UpdatedAt  int64  `json:"updated_at"`
 }
 
 // Store 封装 bbolt。
@@ -910,21 +918,56 @@ func (s *Store) CountPending(now int64) (int, error) {
 
 // ---------- Live Activity token ----------
 
-// PutLAToken 写入/覆盖一个 Live Activity token。
+// PutLAToken 写入/覆盖一个 Live Activity token（按 ApprovalID 是否为空
+// 落到会话级键或审批级键，见 LAToken 注释）。
 func (s *Store) PutLAToken(t LAToken) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return putJSONKey(tx.Bucket(bucketLATokens), laKey(t.DeviceID, t.SessionID), t)
+		var key []byte
+		if t.ApprovalID != "" {
+			key = laApprovalKey(t.DeviceID, t.ApprovalID)
+		} else {
+			key = laKey(t.DeviceID, t.SessionID)
+		}
+		return putJSONKey(tx.Bucket(bucketLATokens), key, t)
 	})
 }
 
-// DeleteLAToken 删除一个 Live Activity token（会话结束时）。
+// DeleteLAToken 删除一个会话级 Live Activity token（会话结束时）。
 func (s *Store) DeleteLAToken(deviceID, sessionID string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketLATokens).Delete(laKey(deviceID, sessionID))
 	})
 }
 
+// DeleteApprovalLAToken 删除一条审批自己的卡 token（该审批收场后 token
+// 即失效：卡已 end，再推只会 410）。
+func (s *Store) DeleteApprovalLAToken(deviceID, approvalID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketLATokens).Delete(laApprovalKey(deviceID, approvalID))
+	})
+}
+
+// LATokenForApproval 读取一条审批自己的卡 token；ok=false 表示该审批的卡
+// token 尚未上报（App 没被唤醒 / 旧版 App）或已随收场剪枝。
+func (s *Store) LATokenForApproval(deviceID, approvalID string) (LAToken, bool, error) {
+	var t LAToken
+	ok := false
+	err := s.db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket(bucketLATokens).Get(laApprovalKey(deviceID, approvalID))
+		if raw == nil {
+			return nil
+		}
+		if err := json.Unmarshal(raw, &t); err != nil {
+			return err
+		}
+		ok = t.PushToken != ""
+		return nil
+	})
+	return t, ok, err
+}
+
 // LATokensForDaemon 返回一台 daemon 下所有 LA token（APNs 转发用）。
+// 同时含会话级与审批级 token，调用方按 ApprovalID 是否为空分流。
 func (s *Store) LATokensForDaemon(daemonID string) ([]LAToken, error) {
 	var out []LAToken
 	err := s.db.View(func(tx *bolt.Tx) error {
@@ -1190,6 +1233,13 @@ func eventIDKey(daemonID, eventID string) []byte {
 
 func laKey(deviceID, sessionID string) []byte {
 	return []byte(deviceID + "/" + sessionID)
+}
+
+// laApprovalKey 是审批级 token 的键。"@approval/" 子命名空间不可能与任何
+// session id 撞键（UUID / sess_ 前缀 / ses_ 前缀都不含 "@"），同时保持
+// "deviceID/" 前缀——设备解绑的按前缀清扫（deleteDeviceTx）一并覆盖。
+func laApprovalKey(deviceID, approvalID string) []byte {
+	return []byte(deviceID + "/@approval/" + approvalID)
 }
 
 // deletePrefix 删除 bucket 中带前缀的全部 key

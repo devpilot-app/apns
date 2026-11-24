@@ -32,6 +32,13 @@ type Notifier interface {
 	Notify(ctx context.Context, device store.Device, env wire.Envelope)
 }
 
+// OriginAwareNotifier 是 Notifier 的可选增强：投递层能区分「由某台设备
+// 自己的决策合成的 approval_closed」，不再给那台设备补发收场替换通知。
+// Hub 按能力探测调用——测试桩只需实现 Notifier。
+type OriginAwareNotifier interface {
+	NotifyResolved(ctx context.Context, device store.Device, env wire.Envelope, originDeviceID string)
+}
+
 // Config 是 Hub 依赖。
 type Config struct {
 	Store    *store.Store

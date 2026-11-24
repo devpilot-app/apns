@@ -390,12 +390,12 @@ func TestThrottlerLatestWins(t *testing.T) {
 	}
 }
 
-// TestApprovalClosedReplacementAlert close 替换推送:同 collapse-id 让已投递
-// 横幅「变脸」,无声、无打断级别、60s 短过期,正文按 close reason 映射。
+// TestApprovalClosedReplacementAlert close 替换推送：只发给「确实收到过这条
+// 审批 alert」的设备（同一 Deliverer 先投过 approval_required），同 collapse-id
+// 让已投递横幅「变脸」，无声、无打断级别、60s 短过期，正文按 close reason
+// 映射，category 不带动作按钮（审批已终结）。
 func TestApprovalClosedReplacementAlert(t *testing.T) {
 	s, dev := setupStore(t, "apns-token")
-	f := &fakePusher{}
-	d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
 
 	cases := []struct {
 		reason string
@@ -407,14 +407,19 @@ func TestApprovalClosedReplacementAlert(t *testing.T) {
 		{wire.CloseReasonCancelled, "Answered at terminal"},
 	}
 	for i, c := range cases {
+		f := &fakePusher{}
+		d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
+
+		// 先投审批 alert：设备没有 push-to-start token，审批走通知面。
+		d.Notify(context.Background(), dev, event(wire.EventApprovalRequired, "apv_1"))
 		env := event(wire.EventApprovalClosed, "apv_1")
 		env.Payload.StatusText = c.reason
 		d.Notify(context.Background(), dev, env)
 		calls := f.snapshot()
-		if len(calls) != i+1 {
-			t.Fatalf("calls = %d after %s", len(calls), c.reason)
+		if len(calls) != 2 {
+			t.Fatalf("case %d (%s): calls = %d, want [approval alert, replacement]", i, c.reason, len(calls))
 		}
-		req := calls[i]
+		req := calls[1]
 		if req.PushType != "alert" || req.Priority != 10 || req.Expiration != testNow+closeExpiry {
 			t.Fatalf("params = %+v", req)
 		}
@@ -431,9 +436,76 @@ func TestApprovalClosedReplacementAlert(t *testing.T) {
 		if aps["thread-id"] != "approval" {
 			t.Fatalf("aps = %+v", aps)
 		}
+		if aps["category"] != defaultResolvedCategory {
+			t.Fatalf("replacement category = %v, want action-less %s", aps["category"], defaultResolvedCategory)
+		}
 		if got := aps["alert"].(map[string]string)["body"]; got != c.body {
 			t.Fatalf("body = %q, want %q", got, c.body)
 		}
+	}
+}
+
+// TestCloseNoReplacementWithoutApprovalAlert 卡面承载的审批收场不补通知：
+// 该设备没收到过审批 alert（LA 已覆盖），close 不得凭空造出一条 Approved。
+func TestCloseNoReplacementWithoutApprovalAlert(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	f := &fakePusher{}
+	d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
+
+	for _, reason := range []string{wire.CloseReasonApproved, wire.CloseReasonDenied, wire.CloseReasonCancelled} {
+		env := event(wire.EventApprovalClosed, "apv_1")
+		env.Payload.StatusText = reason
+		d.Notify(context.Background(), dev, env)
+		if calls := f.snapshot(); len(calls) != 0 {
+			t.Fatalf("%s: 没发过审批 alert 的设备不得收到替换通知，实际 %d 条", reason, len(calls))
+		}
+	}
+}
+
+// TestCloseNoReplacementToOriginDevice 决策发起设备不收替换通知：用户点按
+// 动作时系统已移除那条通知，再推就是新造一条 Approved（2026-11-23 真机）。
+// 来源是别的设备/未知时，收到过 alert 的设备照常收到替换通知。
+func TestCloseNoReplacementToOriginDevice(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	closeEnv := event(wire.EventApprovalClosed, "apv_1")
+	closeEnv.Payload.StatusText = wire.CloseReasonApproved
+
+	// 每个子用例独立的 Deliverer（alerted 记忆是实例态），审批 alert 都先投递。
+	run := func(origin string) int {
+		f := &fakePusher{}
+		d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
+		d.Notify(context.Background(), dev, event(wire.EventApprovalRequired, "apv_1"))
+		d.NotifyResolved(context.Background(), dev, closeEnv, origin)
+		return len(f.snapshot())
+	}
+	if got := run(dev.ID); got != 1 {
+		t.Fatalf("决策发起设备不得收到替换通知，实际 %d 条", got)
+	}
+	if got := run("dv_other"); got != 2 {
+		t.Fatalf("其他来源的 close 应发替换通知，实际 %d 条", got)
+	}
+	if got := run(""); got != 2 {
+		t.Fatalf("来源未知的 close 应发替换通知，实际 %d 条", got)
+	}
+}
+
+// TestMissedApprovalStillNotifiesWithoutAlert expired 是例外：审批由 LA 卡
+// 承载、用户错过时，卡被收走后仍要有一条「Missed approval」提醒。
+func TestMissedApprovalStillNotifiesWithoutAlert(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	f := &fakePusher{}
+	d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
+
+	env := event(wire.EventApprovalClosed, "apv_missed")
+	env.Payload.StatusText = wire.CloseReasonExpired
+	d.Notify(context.Background(), dev, env)
+	calls := f.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("没发过 alert 的设备，expired 仍应提醒，实际 %d 条", len(calls))
+	}
+	aps := calls[0].Payload.(map[string]any)["aps"].(map[string]any)
+	if got := aps["alert"].(map[string]string)["body"]; got != "Missed approval — open the session to continue" {
+		t.Fatalf("body = %q", got)
 	}
 }
 
@@ -637,6 +709,12 @@ func TestCloudApprovalPushToStart(t *testing.T) {
 	env := event(wire.EventApprovalRequired, "apv_1")
 	env.ExpiresAt = testNow + 1800
 	env.Payload.Hostname = "Erics-MacBook.local"
+	// 路由线索随卡走：Answer at Terminal 的导航目标必须在卡上（App 冷启动时
+	// 收件箱里还没有这张卡）。
+	env.Payload.TmuxSession, env.Payload.TmuxWindow = "0", "0"
+	env.Payload.TmuxPane, env.Payload.Cwd = "%0", "/Users/eric/Desktop/DevPilot_App/DevPilot-APNS"
+	env.Payload.ProjectDir = "/Users/eric/Desktop/DevPilot_App"
+	env.Payload.HostIP, env.Payload.User = "192.168.1.134", "eric"
 	d.Notify(context.Background(), dev, env)
 
 	calls := f.snapshot()
@@ -650,6 +728,9 @@ func TestCloudApprovalPushToStart(t *testing.T) {
 	}
 	if !sawLA {
 		t.Fatalf("push-to-start LA push missing: %+v", calls)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("卡面已交出去就不得再发审批 alert（卡+通知双份）: %+v", calls)
 	}
 	if cloud.DeviceToken != "pts-token" || cloud.Topic != laTopic || cloud.Priority != 10 {
 		t.Fatalf("cloud push params = %+v", cloud)
@@ -669,20 +750,162 @@ func TestCloudApprovalPushToStart(t *testing.T) {
 		st.HostName != "Erics-MacBook.local" || st.ApprovalID != "apv_1" {
 		t.Fatalf("content-state = %+v", st)
 	}
+	if st.TmuxSession != "0" || st.TmuxWindow != "0" || st.TmuxPane != "%0" ||
+		st.Cwd != "/Users/eric/Desktop/DevPilot_App/DevPilot-APNS" ||
+		st.ProjectDir != "/Users/eric/Desktop/DevPilot_App" || st.HostIP != "192.168.1.134" ||
+		st.User != "eric" || st.Agent != string(wire.AgentClaude) {
+		t.Fatalf("路由线索必须随卡走: %+v", st)
+	}
 	if push.APS.StaleDate != testNow+1800+60 {
 		t.Fatalf("stale-date = %d", push.APS.StaleDate)
 	}
 
-	// close:只新增替换 alert,不再向设备级 token 发 LA。
+	// close：卡面承载的审批收场不补通知（这台设备没收到过审批 alert），也
+	// 不向设备级 token 发 LA。App 未上报该审批的卡 token 时无卡可收，卡面
+	// 清理由 App 侧对账兜底。
 	before := len(f.snapshot())
 	closeEnv := event(wire.EventApprovalClosed, "apv_1")
 	closeEnv.Payload.StatusText = wire.CloseReasonApproved
 	d.Notify(context.Background(), dev, closeEnv)
-	if calls = f.snapshot(); len(calls) != before+1 {
-		t.Fatalf("close should only add the replacement alert: %d -> %d", before, len(calls))
+	if calls = f.snapshot(); len(calls) != before {
+		t.Fatalf("close must not fabricate a replacement alert for a card-covered approval: %d -> %d", before, len(calls))
 	}
-	if added := calls[len(calls)-1]; added.PushType != "alert" {
-		t.Fatalf("added push = %+v", added)
+}
+
+// TestApprovalCardStartNotAcceptedFallsBackToAlert 出卡裁决看 APNs 实际结果：
+// start 推送没被受理（传输失败 / 5xx）时回落审批 alert，绝不「无卡无通知」。
+func TestApprovalCardStartNotAcceptedFallsBackToAlert(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	if err := s.SetPushToStartToken(dev.ID, "pts-token", testNow); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := s.Device(dev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakePusher{respond: func(req apns.Request) (apns.Result, error) {
+		if req.PushType == "liveactivity" {
+			return apns.Result{Status: 503, Reason: "ServiceUnavailable"}, nil
+		}
+		return apns.Result{Status: 200}, nil
+	}}
+	d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
+
+	d.Notify(context.Background(), dev, event(wire.EventApprovalRequired, "apv_1"))
+	calls := f.snapshot()
+	if len(calls) != 2 || calls[0].PushType != "liveactivity" || calls[1].PushType != "alert" {
+		t.Fatalf("want [rejected start, fallback alert], got %+v", calls)
+	}
+	if calls[1].CollapseID != "apv-apv_1" {
+		t.Fatalf("fallback alert collapse = %q", calls[1].CollapseID)
+	}
+	// push-to-start token 不因 5xx 被剪（只有 410 才剪）。
+	got, _ := s.Device(dev.ID)
+	if got.PushToStartToken != "pts-token" {
+		t.Fatalf("push-to-start token wrongly cleared on 5xx: %q", got.PushToStartToken)
+	}
+}
+
+// TestApprovalCardPerApprovalLifecycle 一审批一卡：App 为每条审批上报自己的
+// 卡 token；close 只 end 对应那张卡（dismissal-date 在过去 = 立即移除），
+// 发完剪 token，不波及同会话另一条待决的卡。
+func TestApprovalCardPerApprovalLifecycle(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	for approvalID, token := range map[string]string{"apv_a": "la-a", "apv_b": "la-b"} {
+		if err := s.PutLAToken(store.LAToken{
+			DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_1",
+			ApprovalID: approvalID, PushToken: token, UpdatedAt: testNow,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := &fakePusher{}
+	d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
+
+	closeEnv := event(wire.EventApprovalClosed, "apv_a")
+	closeEnv.Payload.StatusText = wire.CloseReasonApproved
+	d.Notify(context.Background(), dev, closeEnv)
+
+	calls := f.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("close 只应 end 该审批自己的卡: %+v", calls)
+	}
+	push := calls[0].Payload.(wire.CloudApprovalPush)
+	if calls[0].DeviceToken != "la-a" || calls[0].PushType != "liveactivity" {
+		t.Fatalf("end push must target apv_a's card token: %+v", calls[0])
+	}
+	if push.APS.Event != "end" || push.APS.ContentState.ApprovalID != "apv_a" ||
+		push.APS.ContentState.State != wire.CloudStateApproved {
+		t.Fatalf("end push = %+v", push.APS)
+	}
+	if push.APS.DismissalDate >= push.APS.Timestamp {
+		t.Fatalf("dismissal-date 必须在过去（立即移除）: %+v", push.APS)
+	}
+	if _, ok, _ := s.LATokenForApproval(dev.ID, "apv_a"); ok {
+		t.Fatal("收场后该审批的卡 token 应被剪除")
+	}
+	if tok, ok, _ := s.LATokenForApproval(dev.ID, "apv_b"); !ok || tok.PushToken != "la-b" {
+		t.Fatalf("同会话另一条审批的卡 token 不得被波及: ok=%v %+v", ok, tok)
+	}
+
+	// 重复 close 无 token 可用：不再推送。
+	d.Notify(context.Background(), dev, closeEnv)
+	if calls = f.snapshot(); len(calls) != 1 {
+		t.Fatalf("重复 close 不应再次推送: %+v", calls)
+	}
+}
+
+// TestSessionEndedEndsAllApprovalCards 会话结束是安全网：该会话名下每条审批
+// 自己的卡都收到 end，其他会话的不动。
+func TestSessionEndedEndsAllApprovalCards(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	tokens := []store.LAToken{
+		{DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_1", ApprovalID: "apv_a", PushToken: "la-a", UpdatedAt: testNow},
+		{DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_1", ApprovalID: "apv_b", PushToken: "la-b", UpdatedAt: testNow},
+		{DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_2", ApprovalID: "apv_c", PushToken: "la-c", UpdatedAt: testNow},
+	}
+	for _, tok := range tokens {
+		if err := s.PutLAToken(tok); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := &fakePusher{}
+	d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
+
+	env := event(wire.EventSessionEnded, "")
+	env.SessionID = "sess_1"
+	d.Notify(context.Background(), dev, env)
+
+	ended := map[string]bool{}
+	for _, c := range f.snapshot() {
+		if p, ok := c.Payload.(wire.CloudApprovalPush); ok && p.APS.Event == "end" {
+			ended[c.DeviceToken] = true
+		}
+	}
+	if len(ended) != 2 || !ended["la-a"] || !ended["la-b"] {
+		t.Fatalf("sess_1 的两张审批卡都应被 end: %v", ended)
+	}
+	if _, ok, _ := s.LATokenForApproval(dev.ID, "apv_c"); !ok {
+		t.Fatal("其他会话的卡 token 不得被剪")
+	}
+}
+
+// TestSendLiveActivitySkipsApprovalTokens 审批级 token 属于云审批卡：L1 会话
+// 进度卡推送不得打到它上面（content-state 形状不同，属隐性串线）。
+func TestSendLiveActivitySkipsApprovalTokens(t *testing.T) {
+	s, dev := setupStore(t, "")
+	if err := s.PutLAToken(store.LAToken{
+		DeviceID: dev.ID, DaemonID: testDaemon, SessionID: "sess_1",
+		ApprovalID: "apv_1", PushToken: "la-token", UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakePusher{}
+	d, _ := newDeliverer(t, s, f, &testClock{t: time.Unix(testNow, 0)}, time.Second)
+
+	d.Notify(context.Background(), dev, event(wire.EventToolRunning, ""))
+	if calls := f.snapshot(); len(calls) != 0 {
+		t.Fatalf("L1 推送不得打到审批级 token: %+v", calls)
 	}
 }
 
@@ -772,9 +995,9 @@ func TestCloudApprovalDeadSessionTokenFallsToPushToStart(t *testing.T) {
 	}
 }
 
-// TestCloudApprovalSessionTokenPreferred 会话级 token(App 前台起卡)优先于
-// push-to-start:approval_required 走 update(无 start 属性),close 走
-// end(dismissal-date = now+5)。
+// TestCloudApprovalSessionTokenPreferred 旧版 App 的会话级 token 优先于
+// push-to-start：approval_required 走 update(无 start 属性)，close 走
+// end(dismissal-date 在过去 = 立即移除)。
 func TestCloudApprovalSessionTokenPreferred(t *testing.T) {
 	s, dev := setupStore(t, "")
 	if err := s.SetPushToStartToken(dev.ID, "pts-token", testNow); err != nil {
@@ -829,8 +1052,8 @@ func TestCloudApprovalSessionTokenPreferred(t *testing.T) {
 	if end.APS.ContentState.State != wire.CloudStateDenied {
 		t.Fatalf("end state = %+v", end.APS.ContentState)
 	}
-	if end.APS.DismissalDate != testNow+5 {
-		t.Fatalf("dismissal-date = %d", end.APS.DismissalDate)
+	if end.APS.DismissalDate != testNow-1 {
+		t.Fatalf("dismissal-date = %d（应为过去时间，立即移除）", end.APS.DismissalDate)
 	}
 	if endReq.DeviceToken != "la-token" {
 		t.Fatalf("end push should target the session token: %+v", endReq)
@@ -1015,7 +1238,7 @@ func TestCloseEndsCardWhenSessionDrained(t *testing.T) {
 	if last.APS.Event != "end" {
 		t.Fatalf("会话已无待决, close 必须仍为 end: %+v", last.APS)
 	}
-	if last.APS.DismissalDate <= last.APS.Timestamp {
-		t.Fatalf("end 推送应带 dismissal-date(now+5): %+v", last.APS)
+	if last.APS.DismissalDate >= last.APS.Timestamp {
+		t.Fatalf("end 推送的 dismissal-date 必须在过去（立即移除）: %+v", last.APS)
 	}
 }

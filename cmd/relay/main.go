@@ -175,6 +175,7 @@ func runServe(args []string) int {
 		notifier = deliver.New(deliver.Config{
 			Store: st, Pusher: client, Metrics: m, Logger: logger, Quota: eng, Now: now,
 			APNSCategory: cfg.APNSCategory, APNSQuestionCategory: cfg.APNSQuestionCategory,
+			APNSResolvedCategory:      cfg.APNSResolvedCategory,
 			QuotaExemptApprovalPushes: cfg.QuotaExemptApprovalPushes,
 		})
 		apnsOK = client.Healthy
@@ -249,7 +250,7 @@ func runServe(args []string) int {
 					logger.Warn("failed to clean up expired data", "err", err)
 				}
 				for _, p := range expired {
-					hub.SynthesizeClose(p, wire.CloseReasonExpired)
+					hub.SynthesizeClose(p, wire.CloseReasonExpired, "")
 				}
 			}
 		}

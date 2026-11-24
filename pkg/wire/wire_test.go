@@ -274,8 +274,8 @@ func TestCloudApprovalPushShapes(t *testing.T) {
 		if end.APS.Event != "end" {
 			t.Fatalf("%s 期望 end，实际 %q", c.reason, end.APS.Event)
 		}
-		if end.APS.DismissalDate != 205 {
-			t.Fatalf("%s dismissal 应为 now+5，实际 %d", c.reason, end.APS.DismissalDate)
+		if end.APS.DismissalDate != 199 {
+			t.Fatalf("%s dismissal 应为 now-1（过去时间 = 立即移除），实际 %d", c.reason, end.APS.DismissalDate)
 		}
 		if end.APS.ContentState.State != c.want {
 			t.Fatalf("终态映射不符: 期望 %s 实际 %s", c.want, end.APS.ContentState.State)
@@ -357,5 +357,138 @@ func TestCloudApprovalPendingCountOmission(t *testing.T) {
 	}
 	if !strings.Contains(string(blob), `"pendingCount":3`) {
 		t.Fatalf("多待决必须发 pendingCount 键: %s", blob)
+	}
+}
+
+// TestPayloadRouteFieldsOmitEmpty 钉 project_dir / tmux_pane 的加性契约：
+// 空值不落键（旧 daemon / 旧 relay parity），非空原样往返。
+func TestPayloadRouteFieldsOmitEmpty(t *testing.T) {
+	without, err := Encode(&Envelope{V: Version, Kind: KindEvent, MsgID: "m", EventID: "e",
+		Type: EventApprovalRequired, ApprovalID: "apv_1", Agent: AgentClaude, DaemonID: "dd", SessionID: "s", Seq: 1, TS: 1,
+		Payload: Payload{Title: "t", Cwd: "/repo/sub"}})
+	if err != nil {
+		t.Fatalf("编码失败: %v", err)
+	}
+	if strings.Contains(string(without), "project_dir") || strings.Contains(string(without), "tmux_pane") {
+		t.Fatalf("空 ProjectDir / TmuxPane 不应落键: %s", without)
+	}
+	with, err := Encode(&Envelope{V: Version, Kind: KindEvent, MsgID: "m", EventID: "e",
+		Type: EventApprovalRequired, ApprovalID: "apv_1", Agent: AgentClaude, DaemonID: "dd", SessionID: "s", Seq: 1, TS: 1,
+		Payload: Payload{Title: "t", ProjectDir: "/repo", TmuxPane: "%3"}})
+	if err != nil {
+		t.Fatalf("编码失败: %v", err)
+	}
+	if !strings.Contains(string(with), `"project_dir":"/repo"`) || !strings.Contains(string(with), `"tmux_pane":"%3"`) {
+		t.Fatalf("非空 ProjectDir / TmuxPane 应落键: %s", with)
+	}
+	var back Envelope
+	if err := json.Unmarshal(with, &back); err != nil || back.Payload.ProjectDir != "/repo" || back.Payload.TmuxPane != "%3" {
+		t.Fatalf("往返丢失路由字段: %v %q %q", err, back.Payload.ProjectDir, back.Payload.TmuxPane)
+	}
+}
+
+// TestLATokenApprovalIDRoundTrip 一审批一卡的 token 上报带 approval_id；
+// 不带时是旧版 App 的会话级 token，语义不变。
+func TestLATokenApprovalIDRoundTrip(t *testing.T) {
+	raw, err := Encode(&LAToken{V: Version, Kind: KindLAToken, MsgID: "m", DaemonID: "dd", SessionID: "s",
+		PushToken: "tok", Event: LAStart, TS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "approval_id") {
+		t.Fatalf("会话级 token 不应落 approval_id 键: %s", raw)
+	}
+	with, err := Encode(&LAToken{V: Version, Kind: KindLAToken, MsgID: "m", DaemonID: "dd", SessionID: "s",
+		ApprovalID: "apv_1", PushToken: "tok", Event: LAStart, TS: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := Decode(with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, ok := msg.(*LAToken)
+	if !ok || tok.ApprovalID != "apv_1" {
+		t.Fatalf("审批级 token 往返丢失 approval_id: %T %+v", msg, msg)
+	}
+	if err := tok.Validate(); err != nil {
+		t.Fatalf("审批级 token 应通过校验: %v", err)
+	}
+}
+
+// TestCloudApprovalStateVectors 三仓共享的 content-state 契约向量
+// （testdata/cloud_approval_state.json；iOS TestsApp 用同一份文件做 Codable
+// 测试）。每个用例：Go 结构解码后重新编码，必须与向量的 JSON 逐键一致——
+// 多一个键说明 struct 多发，少一个键说明 iOS 侧期望的字段 relay 发不出。
+func TestCloudApprovalStateVectors(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "cloud_approval_state.json"))
+	if err != nil {
+		t.Fatalf("读取 content-state 向量失败: %v", err)
+	}
+	var file struct {
+		Cases []struct {
+			Name         string          `json:"name"`
+			ContentState json.RawMessage `json:"content_state"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Cases) == 0 {
+		t.Fatal("content-state 向量为空")
+	}
+	canonical := func(b []byte) string {
+		var v any
+		if err := json.Unmarshal(b, &v); err != nil {
+			t.Fatal(err)
+		}
+		out, _ := json.Marshal(v)
+		return string(out)
+	}
+	for _, c := range file.Cases {
+		t.Run(c.Name, func(t *testing.T) {
+			var st CloudApprovalState
+			if err := json.Unmarshal(c.ContentState, &st); err != nil {
+				t.Fatalf("解码失败: %v", err)
+			}
+			if st.Title == "" || st.State == "" {
+				t.Fatalf("title / state 是必填键: %+v", st)
+			}
+			out, err := json.Marshal(st)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if canonical(out) != canonical(c.ContentState) {
+				t.Fatalf("CloudApprovalState 与向量 JSON 不一致:\n got %s\nwant %s", canonical(out), canonical(c.ContentState))
+			}
+		})
+	}
+}
+
+// TestCloudApprovalStateRoutingHints 路由线索从 payload 透传进 content-state；
+// payload 没带时全部整键不发。
+func TestCloudApprovalStateRoutingHints(t *testing.T) {
+	env := Envelope{
+		Type: EventApprovalRequired, ApprovalID: "apv_x", Agent: AgentClaude,
+		DaemonID: "dd_1", SessionID: "sess_1", ExpiresAt: 1000, TS: 100,
+		Payload: Payload{SessionTitle: "支付重构", TmuxSession: "0", TmuxWindow: "1",
+			TmuxPane: "%3", Cwd: "/repo/sub", ProjectDir: "/repo", HostIP: "10.0.0.5", User: "eric"},
+	}
+	st := CloudApprovalStateFor(env, 200)
+	if st.TmuxSession != "0" || st.TmuxWindow != "1" || st.TmuxPane != "%3" ||
+		st.Cwd != "/repo/sub" || st.ProjectDir != "/repo" ||
+		st.HostIP != "10.0.0.5" || st.User != "eric" || st.Agent != "claude" {
+		t.Fatalf("路由线索透传不符: %+v", st)
+	}
+	bare, err := json.Marshal(CloudApprovalStateFor(Envelope{
+		Type: EventApprovalRequired, ApprovalID: "apv_x", SessionID: "sess_1",
+		Payload: Payload{SessionTitle: "t"}}, 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"tmuxSession", "tmuxWindow", "tmuxPane", "cwd", "projectDir", "hostIP", "user", "agent"} {
+		if strings.Contains(string(bare), `"`+key+`"`) {
+			t.Fatalf("空路由线索 %q 不应落键: %s", key, bare)
+		}
 	}
 }

@@ -1,0 +1,29 @@
+{
+  "v": 1,
+  "kind": "event",
+  "msg_id": "0192f0c4-0000-7000-8000-000000000051",
+  "event_id": "0192f0c4-0000-7000-8000-000000000052",
+  "approval_id": "apv_mfrggzdfmztwq2lknnwg23tv3anchor",
+  "type": "approval_required",
+  "agent": "claude",
+  "daemon_id": "dd_01J9Z8K4T3M2N1P0Q7R6S5T4V3",
+  "session_id": "sess_01J9Z8K4T3M2N1P0Q7R6S5T4V3",
+  "seq": 4096,
+  "expires_at": 1760771800,
+  "payload": {
+    "title": "DevPilot_App",
+    "session_title": "DevPilot_App",
+    "tool_name": "Bash",
+    "command_summary": "cd DevPilot-Hook && make test",
+    "input_digest": "9f2c1a7b3d4e5f60",
+    "hostname": "Erics-MacBook-Pro.local",
+    "host_ip": "192.168.1.23",
+    "tmux_session": "0",
+    "tmux_window": "0",
+    "tmux_pane": "%0",
+    "project_dir": "/Users/eric/Desktop/DevPilot_App",
+    "user": "eric",
+    "cwd": "/Users/eric/Desktop/DevPilot_App/DevPilot-Hook"
+  },
+  "ts": 1760770000
+}

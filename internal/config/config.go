@@ -34,6 +34,10 @@ type Config struct {
 	// (2026-11-11 拍板)。存量 App 不认识该串时 iOS 也不展示任何自定义动作,
 	// 降级行为天然安全。
 	APNSQuestionCategory string
+	// APNSResolvedCategory 是审批收场「替换通知」的 category（无动作按钮）。
+	// 默认 DEVPILOT_RESOLVED。存量 App 不认识该串时 iOS 不展示任何自定义
+	// 动作，降级行为同样安全（已终结的审批本来就不该再出 Approve/Deny）。
+	APNSResolvedCategory string
 
 	// —— 托管多租户:per-daemon 配额(0=关闭对应闸)——
 	RateEventFree   int           // free 档每窗口事件数
@@ -96,6 +100,7 @@ func FromEnv() (*Config, error) {
 		APNSEnvironment:       env("APNS_ENVIRONMENT", "production"),
 		APNSCategory:          env("APNS_CATEGORY", "DEVPILOT_APPROVAL"),
 		APNSQuestionCategory:  env("APNS_QUESTION_CATEGORY", "DEVPILOT_QUESTION"),
+		APNSResolvedCategory:  env("APNS_RESOLVED_CATEGORY", "DEVPILOT_RESOLVED"),
 	}
 	mock, err := strconv.ParseBool(env("APNS_MOCK", "false"))
 	if err != nil {

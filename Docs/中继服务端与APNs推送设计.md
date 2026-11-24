@@ -250,6 +250,7 @@ la_tokens  key=device_hash+"/"+session_id  value={push_token, updated_at}       
 |---|---|---|
 | `APNS_CATEGORY` | `DEVPILOT_APPROVAL` | 审批 category(拼写修正)。**存量 App 只注册旧串 `DEVPLOT_APPROVAL`,App 新版铺开前部署侧显式设旧值**,铺开后删行回归默认 |
 | `APNS_QUESTION_CATEGORY` | `DEVPILOT_QUESTION` | 问题类(`payload.tool_name == "AskUserQuestion"`)通知 category:App 侧注册为**空动作**,点通知本体直达收件箱对应卡。**不要设成审批串**——审批串带 Approve/Deny 快捷钮,问题没有 yes/no 语义,误点就是替用户放行;存量 App 不认该串时 iOS 也不展示任何自定义动作,降级天然安全 |
+| `APNS_RESOLVED_CATEGORY` | `DEVPILOT_RESOLVED` | 审批收场「替换通知」的 category,**不带动作**:审批已终结,横幅上再留 Approve/Deny 就是让用户点一个撒谎的按钮。存量 App 不认该串时 iOS 不展示任何自定义动作,降级同样安全 |
 | `QUOTA_EXEMPT_APPROVAL_PUSHES` | `1` | 审批范围推送(approval alert + 云审批 LA)豁免 UTC 日配额——免费档 10 条/日会被 LA 更新烧穿,旗舰功能不能被配额哑掉;遥测 LA 仍计数 |
 
 速率闸豁免集追加 `approval_closed`(终态广播不能被饿死)。
@@ -268,3 +269,36 @@ la_tokens  key=device_hash+"/"+session_id  value={push_token, updated_at}       
 - Apple:APNs HTTP/2 协议与应答码、.p8 token 鉴权、Live Activity 远程更新(同上游引用)
 - Go 生态事实:net/http 原生 HTTP/2(ForceAttemptHTTP2)、crypto/ecdsa ES256、gorilla/websocket、bbolt/modernc sqlite 纯 Go、autocert
 - 三仓库拆分决策:2026-10-18 用户拍板(daemon 与 relay 分仓)
+
+## 16. 一审批一卡:投递语义(2026-11-23 定型)
+
+> 背景:2026-11-23 真机——用户在锁屏点了两次 Approve,决策都到了 daemon,两张卡却
+> 都停在 needsYou,通知中心还多出两条「Approved」。取证与因果链见 DevPilot 仓库
+> `Docs/bugs/2026-11-23-点Approve卡不消失.md`;不变量见 `Docs/审批呈现面不变量.md`。
+
+relay 侧四条规则(实现:`internal/deliver/deliverer.go`):
+
+1. **卡只由 relay 起,一条审批一张卡**。新版 App 只上报审批级 LA token
+   (`/v1/la-tokens` 带 `approval_id`,键 `device/@approval/<id>`);没有会话级
+   token 的设备,`approval_required` **同步**发一次 push-to-start `start`,按 APNs
+   **实际受理结果**决定是否回落 alert(受理即抑制)。旧实现经节流闭包、调用方只等
+   `Throttle+100ms`,APNs 稍慢就判「没出卡」→ 卡和通知双份。
+2. **`approval_closed` 给这张卡发 end**(`dismissal-date` 取过去时间 = 立即移除,
+   Apple 文档),发完剪 token;`session_ended` 把该会话名下残留的审批卡一并收走。
+3. **收场「替换通知」只发给该发的设备**:① 不是发起决策的那台设备(它点按动作时
+   系统已移除原通知、App 已收卡;决策入口把 device id 作为 origin 传进来);
+   ② 且这台设备**确实收到过**这条审批的 alert(进程内 `alerted` 表)——没发过
+   alert 就没有横幅可「变脸」,照发等于凭空造一条「Approved」。例外:`expired`
+   (用户错过)哪怕没发过 alert 也提醒。替换通知用无动作 category
+   (`APNS_RESOLVED_CATEGORY`)。
+4. **旧版 App 兼容**:只上报会话级 token(不带 `approval_id`)的设备继续走原
+   「一会话一卡」路径(会话 token update/end、节流 latest-wins、收场分流),发版
+   窗口内行为不变。两代 App 按 token 是否带 `approval_id` 分流,键空间互不相交。
+
+content-state 增量(全部 omitempty,旧 App 忽略未知键):`tmuxSession/tmuxWindow/
+tmuxPane/cwd/projectDir/hostIP/user/agent`——Answer at Terminal 的导航线索随卡走,
+App 被 push-to-start 唤醒时收件箱里还没有这张卡。`payload` 增量:`tmux_pane`、
+`project_dir`(hook 输入的 `cwd` 会跟随 agent 的 `cd`,项目根整会话不变)。
+
+契约向量:`pkg/wire/testdata/cloud_approval_state.json`(Go 与 iOS
+`TestsApp/Fixtures/Wire/` 同一份文件,各解码一遍)。

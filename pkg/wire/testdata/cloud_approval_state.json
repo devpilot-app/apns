@@ -1,0 +1,81 @@
+{
+  "_comment": "云审批 Live Activity content-state 契约向量（三仓共享）。relay pkg/wire 的 Go 测试与 iOS TestsApp 的 Swift 测试各解码一遍：键名漂移在锁屏上表现为卡片静默不更新，必须在两端同时钉住。时间一律 Unix epoch 整秒；可选键缺省即不发。",
+  "cases": [
+    {
+      "name": "needs_you_with_route_hints",
+      "_comment": "一审批一卡：Answer at Terminal 的导航线索随卡走（App 冷启动时收件箱里还没有这张卡）。",
+      "content_state": {
+        "title": "DevPilot_App",
+        "toolName": "Bash",
+        "commandSummary": "cd DevPilot-APNS && git log --oneline -5",
+        "hostName": "Erics-MacBook-Pro.local",
+        "approvalId": "apv_01a20898-7246-7e07-9962-4747e37439e9",
+        "state": "needsYou",
+        "expiresAt": 1795442338,
+        "updatedAt": 1795440538,
+        "tmuxSession": "0",
+        "tmuxWindow": "0",
+        "tmuxPane": "%0",
+        "cwd": "/Users/eric/Desktop/DevPilot_App/DevPilot-APNS",
+        "projectDir": "/Users/eric/Desktop/DevPilot_App",
+        "hostIP": "192.168.1.134",
+        "user": "eric",
+        "agent": "claude"
+      }
+    },
+    {
+      "name": "needs_you_legacy_no_hints",
+      "_comment": "旧 relay 载荷：没有路由线索，带并行审批计数徽标。新 App 必须照常解码。",
+      "content_state": {
+        "title": "Refactor auth module",
+        "toolName": "Bash",
+        "commandSummary": "rm -rf build",
+        "approvalId": "apv_legacy_1",
+        "state": "needsYou",
+        "expiresAt": 1760001800,
+        "updatedAt": 1760000000,
+        "pendingCount": 2
+      }
+    },
+    {
+      "name": "question_card",
+      "_comment": "问题卡：Answer at Terminal 单钮；options 为空时靠 toolName 识别。",
+      "content_state": {
+        "title": "DevPilot_App",
+        "toolName": "AskUserQuestion",
+        "commandSummary": "Which database should we ship with?",
+        "hostName": "Erics-MacBook-Pro.local",
+        "approvalId": "apv_01a2089a-4a88-705a-9e29-0b78677a2586",
+        "state": "needsYou",
+        "expiresAt": 1795442459,
+        "updatedAt": 1795440659,
+        "tmuxSession": "0",
+        "tmuxWindow": "0",
+        "tmuxPane": "%0",
+        "cwd": "/Users/eric/Desktop/DevPilot_App",
+        "hostIP": "192.168.1.134",
+        "user": "eric",
+        "agent": "claude"
+      }
+    },
+    {
+      "name": "end_approved",
+      "_comment": "收场 end 推送的终态：relay 不再带倒计时，App/扩展按 state 收卡。",
+      "content_state": {
+        "title": "DevPilot_App",
+        "approvalId": "apv_01a20898-7246-7e07-9962-4747e37439e9",
+        "state": "approved",
+        "updatedAt": 1795440655
+      }
+    },
+    {
+      "name": "end_expired",
+      "content_state": {
+        "title": "DevPilot_App",
+        "approvalId": "apv_01a20898-7246-7e07-9962-4747e37439e9",
+        "state": "expired",
+        "updatedAt": 1795442638
+      }
+    }
+  ]
+}

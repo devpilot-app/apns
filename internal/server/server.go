@@ -345,10 +345,13 @@ func (s *Server) handleAppWS(w http.ResponseWriter, r *http.Request) {
 // push-to-start token(云审批 LA 用,session_id 留空);start/update/end 对应
 // 会话级 activity token 的生命周期。
 type laTokenRequest struct {
-	DaemonID  string       `json:"daemon_id"`
-	SessionID string       `json:"session_id"`
-	PushToken string       `json:"push_token"`
-	Event     wire.LAEvent `json:"event"`
+	DaemonID  string `json:"daemon_id"`
+	SessionID string `json:"session_id"`
+	// ApprovalID 非空 = 新版 App 的一审批一卡 token（只用于该审批的收场
+	// end）；空 = 旧版 App 的会话级 token。加性字段。
+	ApprovalID string       `json:"approval_id,omitempty"`
+	PushToken  string       `json:"push_token"`
+	Event      wire.LAEvent `json:"event"`
 }
 
 func (s *Server) handleLATokenREST(w http.ResponseWriter, r *http.Request) {
@@ -389,13 +392,20 @@ func (s *Server) handleLATokenREST(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := s.cfg.Store.PutLAToken(store.LAToken{
 			DeviceID: device.ID, DaemonID: device.DaemonID, SessionID: req.SessionID,
-			PushToken: req.PushToken, UpdatedAt: s.now().Unix(),
+			ApprovalID: strings.TrimSpace(req.ApprovalID),
+			PushToken:  req.PushToken, UpdatedAt: s.now().Unix(),
 		}); err != nil {
 			s.internal(w, "failed to save LA token", err)
 			return
 		}
 	case wire.LAEnd:
-		if err := s.cfg.Store.DeleteLAToken(device.ID, req.SessionID); err != nil {
+		var err error
+		if approvalID := strings.TrimSpace(req.ApprovalID); approvalID != "" {
+			err = s.cfg.Store.DeleteApprovalLAToken(device.ID, approvalID)
+		} else {
+			err = s.cfg.Store.DeleteLAToken(device.ID, req.SessionID)
+		}
+		if err != nil {
 			s.internal(w, "failed to delete LA token", err)
 			return
 		}
@@ -471,7 +481,8 @@ func (s *Server) handleDecisionREST(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "choice too long")
 		return
 	}
-	status, err := s.cfg.Hub.ApplyDeviceDecision(device.DaemonID, strings.TrimSpace(req.ApprovalID), decision, choice, s.now().Unix())
+	// originDeviceID = 这台设备自己：合成 close 的收场替换通知不再回给它。
+	status, err := s.cfg.Hub.ApplyDeviceDecision(device.DaemonID, strings.TrimSpace(req.ApprovalID), decision, choice, s.now().Unix(), device.ID)
 	if err != nil {
 		s.internal(w, "failed to apply decision", err)
 		return

@@ -519,6 +519,13 @@ func TestDeleteDeviceRemovesLATokens(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// 审批级 token（一审批一卡）也必须随设备解绑级联清除。
+	if err := s.PutLAToken(LAToken{
+		DeviceID: device.ID, DaemonID: daemonID, SessionID: "sess_1",
+		ApprovalID: "apv_1", PushToken: "tok-apv", UpdatedAt: testNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.DeleteDevice(device.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -527,6 +534,65 @@ func TestDeleteDeviceRemovesLATokens(t *testing.T) {
 	}
 	if toks, _ := s.LATokensForDaemon(daemonID); len(toks) != 0 {
 		t.Fatalf("LA tokens should be cascade-deleted: %d", len(toks))
+	}
+}
+
+// TestLATokenApprovalScopedKeys 一审批一卡的 token 键空间：同设备同会话的
+// 多条审批各存各的，与旧版 App 的会话级 token 互不覆盖；重复上报覆盖自己。
+func TestLATokenApprovalScopedKeys(t *testing.T) {
+	s := newStore(t)
+	daemonID := "dd_0123456789abcdef0123456789abcdef"
+	code := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	seedPairing(t, s, code, daemonID)
+	_, device := pairDevice(t, s, code)
+
+	put := func(approvalID, token string) {
+		t.Helper()
+		if err := s.PutLAToken(LAToken{
+			DeviceID: device.ID, DaemonID: daemonID, SessionID: "sess_1",
+			ApprovalID: approvalID, PushToken: token, UpdatedAt: testNow,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("apv_a", "la-a")
+	put("apv_b", "la-b")
+	put("", "la-session") // 旧版 App：会话级 token
+
+	if tok, ok, _ := s.LATokenForApproval(device.ID, "apv_a"); !ok || tok.PushToken != "la-a" {
+		t.Fatalf("apv_a = %+v ok=%v", tok, ok)
+	}
+	if tok, ok, _ := s.LATokenForApproval(device.ID, "apv_b"); !ok || tok.PushToken != "la-b" {
+		t.Fatalf("apv_b = %+v ok=%v", tok, ok)
+	}
+	if _, ok, _ := s.LATokenForApproval(device.ID, "apv_missing"); ok {
+		t.Fatal("未上报的审批不得命中别的 token")
+	}
+	if toks, _ := s.LATokensForDaemon(daemonID); len(toks) != 3 {
+		t.Fatalf("三条 token 必须并存，实际 %d", len(toks))
+	}
+
+	// 同一审批重复上报（token 轮换）覆盖自己，不新增。
+	put("apv_a", "la-a2")
+	if tok, ok, _ := s.LATokenForApproval(device.ID, "apv_a"); !ok || tok.PushToken != "la-a2" {
+		t.Fatalf("apv_a 轮换后 = %+v ok=%v", tok, ok)
+	}
+	if toks, _ := s.LATokensForDaemon(daemonID); len(toks) != 3 {
+		t.Fatalf("轮换不得新增行，实际 %d", len(toks))
+	}
+
+	// 删除互不波及。
+	if err := s.DeleteApprovalLAToken(device.ID, "apv_a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.LATokenForApproval(device.ID, "apv_b"); !ok {
+		t.Fatal("删 apv_a 不得波及 apv_b")
+	}
+	if err := s.DeleteLAToken(device.ID, "sess_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.LATokenForApproval(device.ID, "apv_b"); !ok {
+		t.Fatal("会话级删除不得波及审批级 token")
 	}
 }
 

@@ -56,7 +56,7 @@ func (h *Hub) onEvent(ctx context.Context, c *Conn, env *wire.Envelope) {
 	}
 
 	h.sendToApps(stored.DaemonID, stored)
-	h.notify(ctx, stored)
+	h.notify(ctx, stored, "")
 	h.ack(c, env.MsgID, env.EventID, env.ApprovalID, wire.AckAccepted)
 }
 
@@ -66,7 +66,7 @@ func (h *Hub) onDecision(c *Conn, d *wire.Decision) {
 		h.ack(c, d.MsgID, "", d.ApprovalID, wire.AckRejected)
 		return
 	}
-	status, err := h.ApplyDeviceDecision(c.DaemonID, d.ApprovalID, d.Decision, d.Choice, h.now().Unix())
+	status, err := h.ApplyDeviceDecision(c.DaemonID, d.ApprovalID, d.Decision, d.Choice, h.now().Unix(), c.ID)
 	if err != nil {
 		h.log.Error("failed to apply decision", "approval_id", d.ApprovalID, "err", err)
 		h.ack(c, d.MsgID, "", d.ApprovalID, wire.AckRejected)
@@ -79,7 +79,9 @@ func (h *Hub) onDecision(c *Conn, d *wire.Decision) {
 // ApplyDeviceDecision 是设备决策的唯一入口(WSS onDecision 与 REST /v1/decisions 共用):
 // first-wins 落库 → 转发 daemon(离线则待重连补发) → 合成 approval_closed 广播手机。
 // choice 是选项型审批的所选标签(可空),透传落库并随转发/补发回放,本层不解释语义。
-func (h *Hub) ApplyDeviceDecision(daemonID, approvalID string, decision wire.DecisionKind, choice string, now int64) (wire.AckStatus, error) {
+// originDeviceID 是发起这次决策的设备:合成 close 时投递层据此不再给这台设备
+// 补发「Approved/Denied」替换通知(它已经自己撤掉了审批面)。可空 = 未知来源。
+func (h *Hub) ApplyDeviceDecision(daemonID, approvalID string, decision wire.DecisionKind, choice string, now int64, originDeviceID string) (wire.AckStatus, error) {
 	status, p, err := h.cfg.Store.ApplyDecision(approvalID, daemonID, string(decision), choice, now)
 	if err != nil {
 		return status, err
@@ -103,14 +105,15 @@ func (h *Hub) ApplyDeviceDecision(daemonID, approvalID string, decision wire.Dec
 			reason = wire.CloseReasonDenied
 		}
 	}
-	h.SynthesizeClose(p, reason)
+	h.SynthesizeClose(p, reason, originDeviceID)
 	return status, nil
 }
 
 // SynthesizeClose 为一条已终结的审批合成 approval_closed 事件并广播:
 // 入箱(确定性 event_id 去重,与 daemon 自发路径收敛)→ WSS 扇出 → APNs 替换推送/LA 收场。
 // 供决策落地(手机/REST)、过期清理循环两个来源调用;daemon 自发的 close 走 onEvent 常规路径。
-func (h *Hub) SynthesizeClose(p store.Pending, reason string) {
+// originDeviceID 见 ApplyDeviceDecision;过期清理等非设备决策来源传空。
+func (h *Hub) SynthesizeClose(p store.Pending, reason string, originDeviceID string) {
 	if p.ApprovalID == "" {
 		return
 	}
@@ -140,7 +143,7 @@ func (h *Hub) SynthesizeClose(p store.Pending, reason string) {
 	}
 	h.cfg.Metrics.IncEvent(string(wire.EventApprovalClosed))
 	h.sendToApps(p.DaemonID, stored)
-	h.notify(context.Background(), stored)
+	h.notify(context.Background(), stored, originDeviceID)
 }
 
 // pendingTTL 由 envelope.expires_at 派生等待窗时长;旧 daemon 无该字段或值离谱时回落旧常量。
@@ -173,9 +176,12 @@ func (h *Hub) onLAToken(c *Conn, l *wire.LAToken) {
 			status = wire.AckRejected
 		}
 	default:
+		// ApprovalID 非空 = 新版 App 的一审批一卡 token（只用于该审批的收场
+		// end）；空 = 旧版 App 的会话级 token。落库按键空间分流见 store.LAToken。
 		if err := h.cfg.Store.PutLAToken(store.LAToken{
 			DeviceID: c.ID, DaemonID: l.DaemonID, SessionID: l.SessionID,
-			PushToken: l.PushToken, UpdatedAt: h.now().Unix(),
+			ApprovalID: l.ApprovalID,
+			PushToken:  l.PushToken, UpdatedAt: h.now().Unix(),
 		}); err != nil {
 			h.log.Warn("failed to save LA token", "session_id", l.SessionID, "err", err)
 			status = wire.AckRejected
@@ -286,8 +292,9 @@ func (h *Hub) sendToApps(daemonID string, env wire.Envelope) {
 	}
 }
 
-// notify 异步扇出到 APNs，不阻塞 hook 的等待链路。
-func (h *Hub) notify(ctx context.Context, env wire.Envelope) {
+// notify 异步扇出到 APNs，不阻塞 hook 的等待链路。originDeviceID 非空表示
+// 这条 approval_closed 由该设备的决策合成（见 OriginAwareNotifier）。
+func (h *Hub) notify(ctx context.Context, env wire.Envelope, originDeviceID string) {
 	if h.cfg.Notifier == nil {
 		return
 	}
@@ -317,8 +324,20 @@ func (h *Hub) notify(ctx context.Context, env wire.Envelope) {
 	for _, d := range byToken {
 		device := d
 		// 不继承连接的 ctx：daemon 断线不应取消已排队的 APNs 投递。
-		go h.cfg.Notifier.Notify(context.Background(), device, env)
+		go h.notifyDevice(context.Background(), device, env, originDeviceID)
 	}
+}
+
+// notifyDevice 对单台设备投递：投递层支持 OriginAwareNotifier 时把决策
+// 来源交给它，否则退回普通 Notify（测试桩）。
+func (h *Hub) notifyDevice(ctx context.Context, device store.Device, env wire.Envelope, originDeviceID string) {
+	if originDeviceID != "" {
+		if n, ok := h.cfg.Notifier.(OriginAwareNotifier); ok {
+			n.NotifyResolved(ctx, device, env, originDeviceID)
+			return
+		}
+	}
+	h.cfg.Notifier.Notify(ctx, device, env)
 }
 
 func (h *Hub) ack(c *Conn, ref, eventID, approvalID string, status wire.AckStatus) {

@@ -45,6 +45,23 @@ type CloudApprovalState struct {
 	// 发键，旧 App 解码回落 1，新 App 对旧 relay 同样回落，双向兼容。
 	PendingCount int   `json:"pendingCount,omitempty"`
 	UpdatedAt    int64 `json:"updatedAt"`
+
+	// 路由线索（一审批一卡）：「Answer at Terminal」的导航目标随卡走。
+	// App 被 push-to-start 拉起、或冷启动时收件箱里还没有这张卡，按钮若
+	// 只拿 approval_id 去查卡就会查空、落回收件箱。键名与 iOS
+	// CloudApprovalAttributes.ContentState 的 Codable 键逐字对齐；全部
+	// omitempty，旧 App 忽略未知键。
+	TmuxSession string `json:"tmuxSession,omitempty"`
+	TmuxWindow  string `json:"tmuxWindow,omitempty"`
+	TmuxPane    string `json:"tmuxPane,omitempty"`
+	Cwd         string `json:"cwd,omitempty"`
+	// ProjectDir 是会话启动时的项目根。Cwd 会跟随 agent 的 `cd`；App 为无
+	// tmux 线索的会话派生会话名时必须用它，否则会话后半程的卡片会按子目录
+	// 改姓。
+	ProjectDir string `json:"projectDir,omitempty"`
+	HostIP     string `json:"hostIP,omitempty"`
+	User       string `json:"user,omitempty"`
+	Agent      string `json:"agent,omitempty"`
 }
 
 // CloudApprovalAlert 是 start 事件必需的 alert 体。
@@ -128,6 +145,15 @@ func CloudApprovalStateFor(env Envelope, now int64) CloudApprovalState {
 		ExpiresAt:      expires,
 		// 统一用发送时刻打点，避免 daemon 与 relay 时钟差导致卡片时间倒退。
 		UpdatedAt: now,
+		// 路由线索随卡走（见 CloudApprovalState 字段注释）。
+		TmuxSession: env.Payload.TmuxSession,
+		TmuxWindow:  env.Payload.TmuxWindow,
+		TmuxPane:    env.Payload.TmuxPane,
+		Cwd:         env.Payload.Cwd,
+		ProjectDir:  env.Payload.ProjectDir,
+		HostIP:      env.Payload.HostIP,
+		User:        env.Payload.User,
+		Agent:       string(env.Agent),
 	}
 }
 
@@ -141,7 +167,9 @@ func CloudApprovalPushFor(env Envelope, now int64, isStart bool) CloudApprovalPu
 	switch env.Type {
 	case EventApprovalClosed, EventTaskComplete, EventSessionEnded:
 		event = "end"
-		dismissal = now + 5 // 终态短暂停留后由系统收卡（Moshi 式变形余量）
+		// Apple 文档：dismissal-date 给过去的时间 = end 后立即从锁屏移除
+		// （缺省或给未来时间则停留，最长 4 小时）。审批已收场，卡不该再占屏。
+		dismissal = now - 1
 	}
 
 	stale := int64(0)

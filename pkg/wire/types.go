@@ -170,6 +170,14 @@ type Payload struct {
 	// 仅 App 详情抽屉展示；不参与路由，不进 APNs 手搓 map（deliverer 不加）。
 	// v0.3.1 增量字段。
 	TmuxWindow string `json:"tmux_window,omitempty"`
+	// TmuxPane 是审批发生时所在 tmux 窗格的稳定 id（#{pane_id}，形如 %3）。
+	// 窗口号只定位到窗口；同窗口多窗格时 App 据此把焦点落到 agent 所在
+	// 窗格。加性字段：旧 daemon 不发、旧 relay 解码丢弃，零影响。
+	TmuxPane string `json:"tmux_pane,omitempty"`
+	// ProjectDir 是会话启动时的项目根（Claude Code 的 CLAUDE_PROJECT_DIR）。
+	// 与 Cwd 的区别：Cwd 跟随 agent 的 `cd`（Claude Code 官方文档明示），
+	// ProjectDir 整个会话不变——会话标题与 tmux 归属以它为准。加性字段。
+	ProjectDir string `json:"project_dir,omitempty"`
 	// User 是 hook 进程的 $USER，一键补建主机时预填用户名。
 	User string `json:"user,omitempty"`
 	// Cwd 是会话完整工作目录：仅用于 App 端会话/项目匹配，不进入通知文案。
@@ -295,6 +303,10 @@ type LAToken struct {
 	MsgID     string  `json:"msg_id"`
 	DaemonID  string  `json:"daemon_id"`
 	SessionID string  `json:"session_id"`
+	// ApprovalID 非空 = 一审批一卡（新版 App）：该 token 只属于这一条审批的
+	// Live Activity，relay 只用它给这条审批发收场 end 推送。空 = 旧版 App
+	// 的会话级 token（一会话一卡），按会话键存取，行为不变。加性字段。
+	ApprovalID string  `json:"approval_id,omitempty"`
 	PushToken string  `json:"push_token"`
 	Event     LAEvent `json:"event"`
 	TS        int64   `json:"ts"`

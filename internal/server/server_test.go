@@ -580,6 +580,115 @@ func TestLATokenREST(t *testing.T) {
 	}
 }
 
+// TestLATokenRESTApprovalScoped 一审批一卡：带 approval_id 的 token 按审批
+// 存取——同会话两条审批各自的 token 互不覆盖，也不被会话级 end 误删。
+func TestLATokenRESTApprovalScoped(t *testing.T) {
+	env := newTestEnv(t)
+	env.registerAndPair(t)
+	post := func(body map[string]any) *http.Response {
+		resp, bodyBytes := env.post(t, "/v1/la-tokens", body, env.deviceCr)
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("la-tokens HTTP %d: %s", resp.StatusCode, bodyBytes)
+		}
+		return resp
+	}
+	for _, approvalID := range []string{"apv_a", "apv_b"} {
+		post(map[string]any{
+			"daemon_id": testDaemonID, "session_id": "sess_1", "approval_id": approvalID,
+			"push_token": "la-" + approvalID, "event": "start",
+		})
+	}
+	if tok, ok, err := env.store.LATokenForApproval(env.deviceID, "apv_a"); err != nil || !ok || tok.PushToken != "la-apv_a" {
+		t.Fatalf("apv_a token = %+v ok=%v err=%v", tok, ok, err)
+	}
+	if tok, ok, _ := env.store.LATokenForApproval(env.deviceID, "apv_b"); !ok || tok.PushToken != "la-apv_b" {
+		t.Fatalf("apv_b token 被同会话的另一条审批覆盖: %+v", tok)
+	}
+	// 会话级 end（旧版 App 语义）不得误删审批级 token。
+	post(map[string]any{"daemon_id": testDaemonID, "session_id": "sess_1", "event": "end"})
+	if _, ok, _ := env.store.LATokenForApproval(env.deviceID, "apv_a"); !ok {
+		t.Fatal("会话级 end 不得删除审批级 token")
+	}
+	// 审批级 end 只删自己那条。
+	post(map[string]any{
+		"daemon_id": testDaemonID, "session_id": "sess_1", "approval_id": "apv_a", "event": "end",
+	})
+	if _, ok, _ := env.store.LATokenForApproval(env.deviceID, "apv_a"); ok {
+		t.Fatal("审批级 end 未删除对应 token")
+	}
+	if _, ok, _ := env.store.LATokenForApproval(env.deviceID, "apv_b"); !ok {
+		t.Fatal("审批级 end 不得波及另一条审批的 token")
+	}
+}
+
+// originNotifier 同时实现 wss.Notifier 与 wss.OriginAwareNotifier，记录每条
+// 事件合成 close 时的决策来源设备。
+type originNotifier struct {
+	ch chan originCall
+}
+
+type originCall struct {
+	device store.Device
+	env    wire.Envelope
+	origin string
+}
+
+func newOriginNotifier() *originNotifier {
+	return &originNotifier{ch: make(chan originCall, 8)}
+}
+
+func (n *originNotifier) Notify(_ context.Context, device store.Device, env wire.Envelope) {
+	n.ch <- originCall{device: device, env: env}
+}
+
+func (n *originNotifier) NotifyResolved(_ context.Context, device store.Device, env wire.Envelope, originDeviceID string) {
+	n.ch <- originCall{device: device, env: env, origin: originDeviceID}
+}
+
+// TestDecisionRESTCarriesOriginDevice REST 决策合成的 close 必须带上发起
+// 设备：投递层据此不再给这台设备补发 Approved 替换通知（它点按动作时系统
+// 已经移除那条通知、决策管线已收卡）。
+func TestDecisionRESTCarriesOriginDevice(t *testing.T) {
+	n := newOriginNotifier()
+	env := newTestEnvWithNotifier(t, n)
+	env.registerAndPair(t)
+
+	now := time.Now().Unix()
+	approvalID := "apv_" + strings.Repeat("o", 26)
+	ev := wire.Envelope{
+		V: wire.Version, Kind: wire.KindEvent, MsgID: "m_origin", EventID: "ev_origin",
+		ApprovalID: approvalID, Type: wire.EventApprovalRequired, Agent: wire.AgentClaude,
+		DaemonID: testDaemonID, SessionID: "sess_1", TS: now,
+		Payload: wire.Payload{ToolName: "Bash"},
+	}
+	if _, _, err := env.store.AppendInbox(testDaemonID, ev, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.PutPending(store.Pending{
+		ApprovalID: approvalID, DaemonID: testDaemonID, Event: ev, Status: "pending",
+		CreatedAt: now, ExpiresAt: now + 1800,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := env.post(t, "/v1/decisions",
+		map[string]any{"approval_id": approvalID, "decision": "allow"}, env.deviceCr)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("decide HTTP %d: %s", resp.StatusCode, body)
+	}
+	select {
+	case got := <-n.ch:
+		if got.env.Type != wire.EventApprovalClosed || got.env.ApprovalID != approvalID {
+			t.Fatalf("env = %+v", got.env)
+		}
+		if got.origin != env.deviceID {
+			t.Fatalf("close 必须带上决策发起设备，实际 origin=%q", got.origin)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("notifier not called for synthesized close")
+	}
+}
+
 // TestEventRateLimitAck 端到端验证速率闸:超限回 AckRejected 且不落库,审批类豁免。
 func TestEventRateLimitAck(t *testing.T) {
 	eng := quota.New(quota.Config{

@@ -3,12 +3,15 @@
 // 规则（与设计文档 §4.5 一致,v0.3.0 增补）：
 //   - approval_required：始终发 alert（priority 10、time-sensitive、过期=等待窗），
 //     同时驱动两类 Live Activity（本地会话进度卡 + 云审批卡 push-to-start）；
-//   - approval_closed：发同 collapse-id 的替换推送（Approved/Denied/Missed/
-//     Answered at terminal），让已投递横幅「变脸」；APNs 无法撤回已投递 alert，
-//     替换是平台上限，锁屏干净退场靠云审批卡的 end 推送；
+//   - 审批 alert 只在卡面没交出去时才发：新版 App 一审批一卡，push-to-start
+//     受理即抑制 alert；未受理（无 token/410/传输失败）才回落通知；
+//   - approval_closed：给这条审批自己的卡发 end（dismissal-date 在过去 =
+//     立即移除）；「替换通知」只发给确实收到过审批 alert、且不是自己做的
+//     决策的设备，且不带动作按钮；
 //   - task_complete：始终发 alert（priority 5、24h 过期）与 Live Activity end；
 //   - tool_* / session_started / session_ended：不单独发 alert；
-//   - Live Activity 按 (device, session) 1 秒节流、latest-wins；
+//   - Live Activity 按 (device, session) 1 秒节流、latest-wins（仅旧版 App 的
+//     会话卡路径）；
 //   - 审批范围推送（approval alert + 云审批 LA）默认豁免 UTC 日配额；
 //   - 410 表示 token 失效，立即剪枝，不做重试。
 package deliver
@@ -45,6 +48,13 @@ const (
 	// App 注册空动作,通知本体点击直达收件箱对应卡;绝不复用审批 category
 	// (那串带着 Approve/Deny 动作,对问题就是「替用户拍板」)。
 	defaultQuestionCategory = "DEVPILOT_QUESTION"
+	// defaultResolvedCategory 是审批收场「替换通知」的 category：**不带任何
+	// 动作**。审批已终结，横幅上再留 Approve/Deny 就是让用户点一个撒谎的
+	// 按钮（旧实现沿用审批 category，Approved 通知展开仍可点）。
+	defaultResolvedCategory = "DEVPILOT_RESOLVED"
+	// alertMemoryTTL 是「这台设备收到过这条审批的 alert」记忆的保留期。
+	// 只需覆盖等待窗（最长 6h 的一半够用），过期条目在下次写入时顺带清理。
+	alertMemoryTTL = 2 * time.Hour
 )
 
 // Pusher 是 APNs 客户端的窄接口，便于测试注入。
@@ -68,6 +78,9 @@ type Config struct {
 	// APNSQuestionCategory 是问题类审批(AskUserQuestion)的 category;空值
 	// 回落 defaultQuestionCategory。与审批 category 分开,见 categoryFor。
 	APNSQuestionCategory string
+	// APNSResolvedCategory 是审批收场替换通知的 category（无动作按钮）；
+	// 空值回落 defaultResolvedCategory。见 categoryForResolved。
+	APNSResolvedCategory string
 	// QuotaExemptApprovalPushes 时审批范围推送豁免日配额(见 push())。
 	QuotaExemptApprovalPushes bool
 }
@@ -78,6 +91,15 @@ type Deliverer struct {
 	log      *slog.Logger
 	now      func() time.Time
 	throttle *Throttler
+
+	// alerted 记「某设备确实收到过某条审批的 alert」（approval|device → 时刻）。
+	// 收场替换通知只发给这张表里的设备：没发过审批 alert，就没有横幅可
+	// 「变脸」，照发等于凭空造出一条 Approved/Denied 通知（2026-11-23 真机：
+	// 锁屏卡批完，通知中心多出两条 Approved）。进程内存态，relay 重启后
+	// 最坏结果是某条已决审批的旧横幅没被替换——用户点它只会得到
+	// already_decided，无害。
+	alertMu sync.Mutex
+	alerted map[string]time.Time
 }
 
 // New 构造 Deliverer。
@@ -99,11 +121,20 @@ func New(cfg Config) *Deliverer {
 		log:      cfg.Logger,
 		now:      cfg.Now,
 		throttle: NewThrottler(cfg.Throttle, throttleIdle),
+		alerted:  make(map[string]time.Time),
 	}
 }
 
 // Notify 处理一条事件对单台设备的投递。由 Hub 每设备起一个 goroutine 调用。
 func (d *Deliverer) Notify(ctx context.Context, device store.Device, env wire.Envelope) {
+	d.NotifyResolved(ctx, device, env, "")
+}
+
+// NotifyResolved 与 Notify 相同，originDeviceID 非空表示这条 approval_closed
+// 由该设备的决策合成：它已经自己撤掉了审批面（系统在点按动作时移除通知，
+// 决策管线以 .immediate 收卡），再补一条收场通知就是凭空多出一条
+// 「Approved」。实现 wss.OriginAwareNotifier（Hub 按能力探测调用）。
+func (d *Deliverer) NotifyResolved(ctx context.Context, device store.Device, env wire.Envelope, originDeviceID string) {
 	if d.cfg.Pusher == nil {
 		return
 	}
@@ -111,14 +142,14 @@ func (d *Deliverer) Notify(ctx context.Context, device store.Device, env wire.En
 		ctx = context.Background()
 	}
 	// 云审批卡先行（sendCloudActivity 返回是否对该设备出了卡面推送）：
-	// approval_required 且卡面已覆盖（会话卡 update / push-to-start 起卡）
-	// 时跳过审批 alert——锁屏同时出现卡+通知纯属重复（2026-11-11 真机
-	// 反馈）。卡起不来（LA 被关→无 token；强退兜底失败）时这里自然回落
-	// 通知层，审批可达性不依赖本次抑制。
+	// approval_required 且卡面已覆盖（起卡 / 旧版 App 的会话卡 update）时
+	// 跳过审批 alert——锁屏同时出现卡+通知纯属重复（2026-11-11 真机
+	// 反馈）。卡起不来（无 push-to-start token；APNs 未受理）时这里自然
+	// 回落通知层，审批可达性不依赖本次抑制。
 	cardPushed := d.sendCloudActivity(d.tierOf(env.DaemonID), device, env)
 	if device.APNSToken != "" &&
 		!(env.Type == wire.EventApprovalRequired && cardPushed) {
-		d.sendAlert(d.tierOf(env.DaemonID), device, env)
+		d.sendAlert(d.tierOf(env.DaemonID), device, env, originDeviceID)
 	}
 	// 没有 alert token 的设备仍可能注册了 Live Activity token。
 	d.sendLiveActivity(d.tierOf(env.DaemonID), device, env)
@@ -156,7 +187,10 @@ func (d *Deliverer) categoryFor(env wire.Envelope) string {
 }
 
 // sendAlert 只对审批、审批关闭与任务完成发通知。
-func (d *Deliverer) sendAlert(tier store.Tier, device store.Device, env wire.Envelope) {
+//
+// originDeviceID 非空 = 这条 approval_closed 由该设备的决策合成（见
+// NotifyResolved）；对其余事件无意义，传空即可。
+func (d *Deliverer) sendAlert(tier store.Tier, device store.Device, env wire.Envelope, originDeviceID string) {
 	now := d.now().Unix()
 	var (
 		payload    map[string]any
@@ -204,6 +238,25 @@ func (d *Deliverer) sendAlert(tier store.Tier, device store.Device, env wire.Env
 			env.Payload.StatusText == wire.CloseReasonExpired {
 			return
 		}
+		// 替换通知的前置条件（2026-11-23 真机：两条都不满足时照发，通知中心
+		// 凭空多出两条 Approved）：
+		//   ① 不是这台设备自己的决策合成的——系统在点按动作时已经移除那条
+		//      通知、决策管线已收卡，再推就是新造一条；
+		//   ② 这台设备确实收到过这条审批的 alert——没有横幅就无从「变脸」，
+		//      走 Live Activity 的审批收场靠 end 推送，不归这里管。
+		// 例外：expired（用户错过）哪怕没发过 alert 也要提醒——审批是 LA 卡
+		// 承载的时候，卡收走后用户需要一条「Missed approval」知道终端在等。
+		missed := env.Payload.StatusText == wire.CloseReasonExpired
+		if originDeviceID != "" && originDeviceID == device.ID {
+			d.forgetAlerted(env.ApprovalID, device.ID)
+			return
+		}
+		if !missed && !d.wasAlerted(env.ApprovalID, device.ID) {
+			d.log.Info("skipping close replacement push: no approval alert was delivered to this device",
+				"device_id", device.ID, "approval_id", env.ApprovalID)
+			return
+		}
+		d.forgetAlerted(env.ApprovalID, device.ID)
 		// 替换推送:同 collapse-id 让已投递的审批横幅「变脸」为终态。
 		// 静默(无声音、无打断级别)——用户已在别处处理,不再打扰。
 		title := env.Payload.SessionTitle
@@ -217,7 +270,8 @@ func (d *Deliverer) sendAlert(tier store.Tier, device store.Device, env wire.Env
 			"aps": map[string]any{
 				"alert":     map[string]string{"title": wire.Truncate(title, wire.MaxTitleRunes), "body": closedBody(env)},
 				"thread-id": "approval",
-				"category":  category,
+				// 无动作 category：已终结的审批不再提供 Approve/Deny。
+				"category": d.categoryForResolved(),
 			},
 			"type":        string(env.Type),
 			"event_id":    env.EventID,
@@ -272,12 +326,64 @@ func (d *Deliverer) sendAlert(tier store.Tier, device store.Device, env wire.Env
 		CollapseID:  collapseID,
 		Payload:     payload,
 	})
+	if env.Type == wire.EventApprovalRequired && res.Accepted() {
+		// 审批 alert 确实发出去了：收场时才有横幅可替换成终态文案。
+		d.markAlerted(env.ApprovalID, device.ID)
+	}
 	if res.Prune {
 		// device token 已失效：清空，等待 App 下次启动重新上报。
 		if err := d.cfg.Store.ClearDeviceAPNSToken(device.ID); err != nil {
 			d.log.Warn("failed to clear stale device token", "device_id", device.ID, "err", err)
 		}
 	}
+}
+
+// categoryForResolved 返回收场替换通知的 category（配置优先，回落默认串）。
+func (d *Deliverer) categoryForResolved() string {
+	if c := d.cfg.APNSResolvedCategory; c != "" {
+		return c
+	}
+	return defaultResolvedCategory
+}
+
+func alertedKey(approvalID, deviceID string) string { return approvalID + "|" + deviceID }
+
+// markAlerted 记一次「审批 alert 已被 APNs 受理」。表过长时顺带清掉过期项，
+// 不设后台协程。
+func (d *Deliverer) markAlerted(approvalID, deviceID string) {
+	d.alertMu.Lock()
+	defer d.alertMu.Unlock()
+	now := d.now()
+	if len(d.alerted) > 256 {
+		cutoff := now.Add(-alertMemoryTTL)
+		for k, at := range d.alerted {
+			if at.Before(cutoff) {
+				delete(d.alerted, k)
+			}
+		}
+	}
+	d.alerted[alertedKey(approvalID, deviceID)] = now
+}
+
+func (d *Deliverer) wasAlerted(approvalID, deviceID string) bool {
+	d.alertMu.Lock()
+	defer d.alertMu.Unlock()
+	key := alertedKey(approvalID, deviceID)
+	at, ok := d.alerted[key]
+	if !ok {
+		return false
+	}
+	if d.now().Sub(at) > alertMemoryTTL {
+		delete(d.alerted, key)
+		return false
+	}
+	return true
+}
+
+func (d *Deliverer) forgetAlerted(approvalID, deviceID string) {
+	d.alertMu.Lock()
+	delete(d.alerted, alertedKey(approvalID, deviceID))
+	d.alertMu.Unlock()
 }
 
 // closedBody 生成审批关闭替换推送的正文,按 close reason 映射终态文案。
@@ -313,7 +419,11 @@ func (d *Deliverer) sendLiveActivity(tier store.Tier, device store.Device, env w
 		priority = 10
 	}
 	for _, tok := range tokens {
-		if tok.DeviceID != device.ID || tok.SessionID != env.SessionID || tok.PushToken == "" {
+		// 审批级 token 属于云审批卡（CloudApprovalAttributes），不是本地会话
+		// 进度卡（AgentActivityAttributes）：把 L1 载荷推到它上面是隐性串线
+		// （content-state 形状对不上，轻则被丢、重则 410 误剪），一律跳过。
+		if tok.ApprovalID != "" ||
+			tok.DeviceID != device.ID || tok.SessionID != env.SessionID || tok.PushToken == "" {
 			continue
 		}
 		token, session := tok.PushToken, tok.SessionID
@@ -375,14 +485,18 @@ func (d *Deliverer) push(tier store.Tier, kind, deviceID string, env wire.Envelo
 	return res
 }
 
-// sendCloudActivity 驱动云审批 LA(CloudApprovalAttributes,新版 App):
-//   - approval_required:优先会话级 token(App 前台起卡时上报)发 update;
-//     没有则用设备级 push-to-start token 发 start——App 被杀也能起卡(iOS 17.2+)。
-//   - approval_closed / task_complete / session_ended:会话级 token 发 end 收场。
-//   - 其余遥测事件不驱动云审批卡(回到 working 形态由 update 事件承担,这里不扩)。
-//   - 强退的 App:push-to-start 被 iOS 拒绝,自然回落通知按钮层(App 侧契约)。
+// sendCloudActivity 驱动云审批 LA(CloudApprovalAttributes)。两代 App 并存，
+// 按设备手里登记的是哪一种 token 分流：
 //
-// 返回本次是否对该设备出了卡面推送(approval_required 的 update/start),
+//   - **一审批一卡**（新版 App，只上报审批级 token）：每条 approval_required
+//     同步发一次 push-to-start start 起它自己的卡；approval_closed 给这张卡
+//     发 end（dismissal-date 在过去 = 立即移除）。卡的身份是审批，批一条
+//     收一张，不存在「批完一条卡面换脸」。
+//   - **一会话一卡**（旧版 App，上报会话级 token）：保持原有行为——会话
+//     token 发 update/end、节流 latest-wins、收场时把卡面分流给同会话下一条
+//     待决。发版窗口内旧 App 不受影响。
+//
+// 返回本次是否对该设备出了卡面推送（approval_required 的 start/update），
 // Notify 据此抑制同内容的审批 alert。
 func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env wire.Envelope) bool {
 	isEnd := env.Type == wire.EventApprovalClosed ||
@@ -397,11 +511,107 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 	}
 	var sessionToken string
 	for _, tok := range tokens {
-		if tok.DeviceID == device.ID && tok.SessionID == env.SessionID && tok.PushToken != "" {
+		if tok.ApprovalID == "" && tok.DeviceID == device.ID &&
+			tok.SessionID == env.SessionID && tok.PushToken != "" {
 			sessionToken = tok.PushToken
 			break
 		}
 	}
+
+	// 新版 App：没有会话级 token → 一审批一卡。
+	if sessionToken == "" {
+		switch env.Type {
+		case wire.EventApprovalRequired:
+			return d.startApprovalCard(tier, device, env)
+		case wire.EventApprovalClosed:
+			d.endApprovalCard(tier, device, env, nil)
+		case wire.EventSessionEnded:
+			// 会话收场是安全网：残留的审批卡（审批已被 Ctrl-C 取消等）一并收走。
+			for i := range tokens {
+				tok := &tokens[i]
+				if tok.ApprovalID == "" || tok.DeviceID != device.ID || tok.SessionID != env.SessionID {
+					continue
+				}
+				d.endApprovalCard(tier, device, env, tok)
+			}
+		}
+		return false
+	}
+	return d.sendSessionCard(tier, device, env, sessionToken)
+}
+
+// startApprovalCard 为一条审批起它自己的卡（push-to-start），同步等 APNs
+// 结果：受理 = 卡面已交出去（抑制同内容的审批 alert）；未受理（设备没有
+// push-to-start token / 410 / 传输失败）= 回落 alert。出卡裁决不再经过节流
+// 闭包——旧实现调用方只等 Throttle+100ms，APNs 稍慢就判「没出卡」，alert
+// 照发而卡也在路上，同一审批卡+通知双份。
+func (d *Deliverer) startApprovalCard(tier store.Tier, device store.Device, env wire.Envelope) bool {
+	if device.PushToStartToken == "" {
+		return false
+	}
+	now := d.now().Unix()
+	res := d.push(tier, cloudLAPushKind, device.ID, env, apns.Request{
+		DeviceToken: device.PushToStartToken,
+		Environment: device.APNSEnv,
+		Topic:       d.cfg.Pusher.LiveActivityTopic(),
+		PushType:    "liveactivity",
+		Priority:    10,
+		Expiration:  now + liveActivityTTL,
+		Payload:     wire.CloudApprovalPushFor(env, now, true),
+	})
+	if res.Prune {
+		if err := d.cfg.Store.SetPushToStartToken(device.ID, "", now); err != nil {
+			d.log.Warn("failed to clear stale push-to-start token", "device_id", device.ID, "err", err)
+		}
+		return false
+	}
+	if !res.Accepted() {
+		d.log.Info("cloud approval card not accepted by APNs; falling back to alert",
+			"device_id", device.ID, "approval_id", env.ApprovalID, "status", res.Status, "reason", res.Reason)
+	}
+	return res.Accepted()
+}
+
+// endApprovalCard 给一条审批自己的卡发收场 end 推送。
+//
+// tok 可为 nil（按 approval_id 现查）。卡 token 由 App 在卡出现时上报
+// （/v1/la-tokens 带 approval_id）；没上报就无卡可收，卡面清理由 App 侧对账
+// 兜底。发完即剪：审批已终结，这条 token 不再有用途；仅传输类失败保留，
+// 留给 cleanup 的 TTL。
+func (d *Deliverer) endApprovalCard(tier store.Tier, device store.Device, env wire.Envelope, tok *store.LAToken) {
+	if tok == nil {
+		found, ok, err := d.cfg.Store.LATokenForApproval(device.ID, env.ApprovalID)
+		if err != nil {
+			d.log.Warn("failed to read approval LA token", "device_id", device.ID, "approval_id", env.ApprovalID, "err", err)
+			return
+		}
+		if !ok {
+			return
+		}
+		tok = &found
+	}
+	now := d.now().Unix()
+	res := d.push(tier, cloudLAPushKind, device.ID, env, apns.Request{
+		DeviceToken: tok.PushToken,
+		Environment: device.APNSEnv,
+		Topic:       d.cfg.Pusher.LiveActivityTopic(),
+		PushType:    "liveactivity",
+		Priority:    10,
+		Expiration:  now + liveActivityTTL,
+		Payload:     wire.CloudApprovalPushFor(env, now, false),
+	})
+	// Status 0 = 没发出去（传输失败/配额拦截），不剪 token。
+	if res.Status != 0 {
+		if err := d.cfg.Store.DeleteApprovalLAToken(device.ID, tok.ApprovalID); err != nil {
+			d.log.Warn("failed to delete approval LA token", "device_id", device.ID, "approval_id", tok.ApprovalID, "err", err)
+		}
+	}
+}
+
+// sendSessionCard 是旧版 App（上报会话级 token）的会话卡路径，行为与重构前
+// 一致：会话 token 发 update/end，节流 latest-wins，close 时把卡面分流给同
+// 会话下一条待决。sessionToken 由 sendCloudActivity 查好传入（非空）。
+func (d *Deliverer) sendSessionCard(tier store.Tier, device store.Device, env wire.Envelope, sessionToken string) bool {
 	now := d.now().Unix()
 	priority := 5
 	if env.Type == wire.EventApprovalRequired {
@@ -520,27 +730,8 @@ func (d *Deliverer) sendCloudActivity(tier store.Tier, device store.Device, env 
 		}
 	}
 
-	// 路径二:设备级 push-to-start token(App 被杀时由 relay 起卡)。
-	// 只对 approval_required 起卡;终局事件无卡可收(410 剪枝 token)。
-	// faceEnv 判定同上:收场分流出来的「下一条待决」在此路径上起卡。
-	if faceEnv.Type == wire.EventApprovalRequired && device.PushToStartToken != "" {
-		push := cloudPush(true)
-		res := d.push(tier, cloudLAPushKind, device.ID, env, apns.Request{
-			DeviceToken: device.PushToStartToken,
-			Environment: device.APNSEnv,
-			Topic:       d.cfg.Pusher.LiveActivityTopic(),
-			PushType:    "liveactivity",
-			Priority:    priority,
-			Expiration:  now + liveActivityTTL,
-			Payload:     push,
-		})
-		if res.Prune {
-			if err := d.cfg.Store.SetPushToStartToken(device.ID, "", now); err != nil {
-				d.log.Warn("failed to clear stale push-to-start token", "device_id", device.ID, "err", err)
-			}
-		}
-		return true
-	}
+	// 没有会话级 token 的设备由 sendCloudActivity 的一审批一卡路径负责，
+	// 这里不再兜底起卡。
 	return false
 }
 
