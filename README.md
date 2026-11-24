@@ -1,22 +1,24 @@
-# DevPilot-APNS
+# DevPilot APNs relay
 
-The **cloud push relay** of the DevPilot project: a single Go binary deployed on a VPS, sitting between the hook daemon and Apple APNs — the daemon connects to it, the iPhone connects to it, and it pushes to APNs on your behalf. Without it, "agent waiting for approval" events die on the dev machine, and a killed app receives nothing.
+The **cloud push relay** of the DevPilot project, in [`devpilot-app/apns`](https://github.com/devpilot-app/apns): a single Go binary deployed on a VPS, sitting between the hook daemon and Apple APNs — the daemon connects to it, the iPhone connects to it, and it pushes to APNs on your behalf. Without it, "agent waiting for approval" events die on the dev machine, and a killed app receives nothing.
+
+> **License:** source-available under [FSL-1.1-ALv2](LICENSE.md) — free to self-host, audit and modify; running it as a competing hosted service needs a commercial license. Details under [License](#license).
 
 ## How the three projects fit together
 
 Two Go repos and one iOS app, one chain:
 
-| | DevPilot | DevPilot-Hook | **DevPilot-APNS (this repo)** |
+| | DevPilot (iOS app) | [devpilot-app/hook](https://github.com/devpilot-app/hook) | **[devpilot-app/apns](https://github.com/devpilot-app/apns) (this repo)** |
 |---|---|---|---|
 | What it is | iOS app (Swift/SwiftUI) | Go daemon on the dev machine | **Go relay on a cloud VPS** |
 | Responsibility | Terminal/SSH, inbox UI, approval panel, Live Activity, APNs token registration | Hook adapters (Claude Code / Codex), local gateway, event aggregation & rate limiting, offline buffering | **WSS ingest, pairing routing table, APNs push, Live Activity remote-update forwarding** |
 | Role in the chain | WSS client (app side) | WSS client (daemon side) | **Hub** |
-| Code boundary | App-side integration (RelayChannel model, etc.) | The daemon; `pkg/wire` imported from this repo via go.mod | The whole relay + the **`pkg/wire` protocol type library (single source of truth for the wire protocol across all three ends)** |
+| Code boundary | App-side integration (RelayChannel model, etc.) | The daemon; `pkg/wire` imported from `github.com/devpilot-app/apns` via go.mod | The whole relay + the **`pkg/wire` protocol type library (single source of truth for the wire protocol across all three ends)** |
 
 ```
 Claude Code/Codex hooks
-  → DevPilot-Hook daemon (local gateway 127.0.0.1:24543)
-  → DevPilot-APNS relay (this repo: auth → routing table → channel selection)
+  → hook daemon, devpilot-app/hook (local gateway 127.0.0.1:24543)
+  → APNs relay, devpilot-app/apns (this repo: auth → routing table → channel selection)
   → Apple APNs (HTTP/2) ── or ── direct push over the app's WSS connection
   → iPhone (notification / Live Activity / inbox)
 Approval flows back: iPhone Allow/Deny → relay → daemon → hook unblocks, agent continues
@@ -59,7 +61,7 @@ Defaults target "one relay serving many users"; a self-hosted single-user setup 
 | Identity TTL | 0 (disabled) | `DAEMON_TTL_DAYS/DEVICE_TTL_DAYS` | daemons that have not connected within TTL are cascade-unregistered; kept at 0 for launch, enable once stable |
 | /metrics | public | `METRICS_TOKEN` | Bearer required when non-empty; Caddy adds a 404 fallback on top |
 
-The tier (`free|pro`) is submitted by the app at pairing time; v0.2 is client-asserted, receipt-level verification is planned for a later round.
+The tier (`free|pro`) is submitted by the app at pairing time; it is client-asserted today, with receipt-level verification planned for a later round.
 
 ## Development & testing
 
@@ -73,11 +75,11 @@ The APNs client can run the delivery path without a `.p8` via `APNS_MOCK=1`; uni
 
 ## Release
 
-`git tag v0.1.0 && git push origin v0.1.0` triggers:
+`git tag vX.Y.Z && git push origin vX.Y.Z` triggers:
 
-- `.github/workflows/docker.yml`: builds and pushes `ghcr.io/devpilot-app/devpilot-relay`;
-- DevPilot-Hook's release depends on this repo's tag (`pkg/wire` is its module dependency),
-  so **this repo must be released before Hook**.
+- `.github/workflows/docker.yml`: builds and pushes `ghcr.io/devpilot-app/devpilot-relay` (tags `X.Y.Z`, `X.Y`, `latest`);
+- the hook repo (`devpilot-app/hook`) depends on this repo's tag via `github.com/devpilot-app/apns`,
+  so **this repo must be released before the hook**.
 
 Server upgrades: `docker compose pull && docker compose up -d`.
 
