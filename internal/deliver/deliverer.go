@@ -171,13 +171,16 @@ func (d *Deliverer) tierOf(daemonID string) store.Tier {
 // Approve/Deny 快捷动作,而问题没有 yes/no 语义——误点 Approve 就是替用户
 // 放行 + 让模型猜答案(2026-11-11 拍板)。问题 category 在 App 侧注册为空
 // 动作,点通知本体走默认路径直达收件箱对应卡。
+// v0.6.0 起「只通知不阻塞」的等待卡(notify_only,TerminalOnly agent 的
+// PermissionRequest 通知)与问题卡同串:手机上同样没有可点的决定,复用
+// 同一条空动作 category,经 IsNotifyOnly 统一判定。
 // 存量 App 未注册该串时 iOS 也不展示任何自定义动作,降级天然安全。
 func (d *Deliverer) categoryFor(env wire.Envelope) string {
 	category := d.cfg.APNSCategory
 	if category == "" {
 		category = legacyApprovalCategory
 	}
-	if env.Payload.ToolName != "AskUserQuestion" {
+	if !env.IsNotifyOnly() {
 		return category
 	}
 	if q := d.cfg.APNSQuestionCategory; q != "" {
@@ -229,12 +232,15 @@ func (d *Deliverer) sendAlert(tier store.Tier, device store.Device, env wire.Env
 		priority = 10
 		collapseID = "apv-" + env.ApprovalID
 	case wire.EventApprovalClosed:
-		// 问题类（AskUserQuestion）在 daemon 侧是「只通知不阻塞」：用户在终端
-		// 答题不会产生决策回流，relay 只能等 pending 过期。这种 expired 不
-		// 代表用户错过——再推一条 "Missed approval" 纯属误报。静默收场：
-		// LA 由 sendCloudActivity 的 end 推送收，App 收件箱卡由 close 事件
-		// 正常转态（本地已按「终端已答」记账的会保持 Answered）。
-		if env.Payload.ToolName == "AskUserQuestion" &&
+		// 「只通知不阻塞」的审批（AskUserQuestion 历史链路 + notify_only
+		// 等待卡，见 IsNotifyOnly）：用户在终端处置，不会产生决策回流，
+		// relay 只能等 pending 过期。这种 expired 不代表用户错过——再推
+		// 一条 "Missed approval" 纯属误报。静默收场：LA 由 sendCloudActivity
+		// 的 end 推送收，App 收件箱卡由 close 事件正常转态（本地已按
+		// 「终端已答」记账的会保持 Answered）。
+		// 闸门模式的审批不带 notify_only（手机决策会回流成 deny JSON），
+		// 其 expired 照常提醒——工具被拦用户应当知道。
+		if env.IsNotifyOnly() &&
 			env.Payload.StatusText == wire.CloseReasonExpired {
 			return
 		}

@@ -82,7 +82,7 @@ WSS 库:gorilla/websocket(生态最广)默认;依赖策略:全部纯 Go,保交�
   "kind": "event | decision | ack | ping",
   "event_id": "uuid —— 幂等键,中继按此去重",
   "type": "session_started | tool_running | tool_finished | approval_required | task_complete",
-  "agent": "claude | codex",
+  "agent": "claude | codex | opencode | gemini | copilot | cursor | grok | qwen",
   "session_id": "daemon 侧会话 id(收件箱单行合并键)",
   "payload": { "title": "...", "command_summary": "...", "reply_summary": "..." },
   "ts": 1760770000

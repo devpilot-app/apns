@@ -11,12 +11,12 @@ Two Go repos and one iOS app, one chain:
 | | DevPilot (iOS app) | [devpilot-app/hook](https://github.com/devpilot-app/hook) | **[devpilot-app/apns](https://github.com/devpilot-app/apns) (this repo)** |
 |---|---|---|---|
 | What it is | iOS app (Swift/SwiftUI) | Go daemon on the dev machine | **Go relay on a cloud VPS** |
-| Responsibility | Terminal/SSH, inbox UI, approval panel, Live Activity, APNs token registration | Hook adapters (Claude Code / Codex), local gateway, event aggregation & rate limiting, offline buffering | **WSS ingest, pairing routing table, APNs push, Live Activity remote-update forwarding** |
+| Responsibility | Terminal/SSH, inbox UI, approval panel, Live Activity, APNs token registration | Hook adapters (Claude Code / Codex / OpenCode / Gemini / Copilot / Cursor / Grok / Qwen), local gateway, event aggregation & rate limiting, offline buffering | **WSS ingest, pairing routing table, APNs push, Live Activity remote-update forwarding** |
 | Role in the chain | WSS client (app side) | WSS client (daemon side) | **Hub** |
 | Code boundary | App-side integration (RelayChannel model, etc.) | The daemon; `pkg/wire` imported from `github.com/devpilot-app/apns` via go.mod | The whole relay + the **`pkg/wire` protocol type library (single source of truth for the wire protocol across all three ends)** |
 
 ```
-Claude Code/Codex hooks
+Coding-agent hooks (Claude Code, Codex, OpenCode, Gemini, Copilot, Cursor, Grok, Qwen)
   → hook daemon, devpilot-app/hook (local gateway 127.0.0.1:24543)
   → APNs relay, devpilot-app/apns (this repo: auth → routing table → channel selection)
   → Apple APNs (HTTP/2) ── or ── direct push over the app's WSS connection

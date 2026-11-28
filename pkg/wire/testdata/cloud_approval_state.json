@@ -59,6 +59,28 @@
       }
     },
     {
+      "name": "notify_only_waiting_terminal",
+      "_comment": "v0.6.0 增量：只通知不阻塞的等待卡（TerminalOnly agent 的 PermissionRequest 通知）。notifyOnly=true 时锁屏/灵动岛只出 Answer at Terminal 单钮，不出 Approve/Deny。",
+      "content_state": {
+        "title": "DevPilot_App",
+        "toolName": "run_shell_command",
+        "commandSummary": "npm test",
+        "hostName": "Erics-MacBook-Pro.local",
+        "approvalId": "apv_01a2089b-1111-7000-8000-000000000001",
+        "notifyOnly": true,
+        "state": "needsYou",
+        "expiresAt": 1795442538,
+        "updatedAt": 1795440738,
+        "tmuxSession": "0",
+        "tmuxWindow": "0",
+        "tmuxPane": "%0",
+        "cwd": "/Users/eric/Desktop/DevPilot_App",
+        "hostIP": "192.168.1.134",
+        "user": "eric",
+        "agent": "gemini"
+      }
+    },
+    {
       "name": "end_approved",
       "_comment": "收场 end 推送的终态：relay 不再带倒计时，App/扩展按 state 收卡。",
       "content_state": {

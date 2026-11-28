@@ -35,7 +35,11 @@ type CloudApprovalState struct {
 	// 选项钮，不再只有 Approve/Deny 二值（2026-11-11 用户反馈）。旧 App
 	// 不解码该键，向后兼容。
 	Options []string `json:"options,omitempty"`
-	State   string   `json:"state"`
+	// NotifyOnly 标记「只通知不阻塞」的卡（与 Payload.NotifyOnly 同源，
+	// 见 types.go）：锁屏/灵动岛据此只出 Answer at Terminal 按钮，不出
+	// Approve/Deny（v0.6.0 增量字段；旧 App 忽略未知键）。
+	NotifyOnly bool   `json:"notifyOnly,omitempty"`
+	State      string `json:"state"`
 	// ExpiresAt 是倒计时终点（Unix 秒）；仅 needsYou 态有意义。
 	ExpiresAt int64 `json:"expiresAt,omitempty"`
 	// PendingCount 是同会话待决审批总数（含本条）。并行工具调用会在同一秒
@@ -141,6 +145,7 @@ func CloudApprovalStateFor(env Envelope, now int64) CloudApprovalState {
 		HostName:       env.Payload.Hostname,
 		ApprovalID:     env.ApprovalID,
 		Options:        env.Payload.Options,
+		NotifyOnly:     env.IsNotifyOnly(),
 		State:          CloudStateFor(env),
 		ExpiresAt:      expires,
 		// 统一用发送时刻打点，避免 daemon 与 relay 时钟差导致卡片时间倒退。

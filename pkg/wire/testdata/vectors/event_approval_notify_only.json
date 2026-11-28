@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "kind": "event",
+  "msg_id": "0192f0c4-0000-7000-8000-000000000061",
+  "event_id": "0192f0c4-0000-7000-8000-000000000062",
+  "approval_id": "apv_mfrggzdfmztwq2lknnwg23tv4notify",
+  "type": "approval_required",
+  "agent": "gemini",
+  "daemon_id": "dd_01J9Z8K4T3M2N1P0Q7R6S5T4V3",
+  "session_id": "sess_01J9Z8K4T3M2N1P0Q7R6S5T4V3",
+  "seq": 4097,
+  "expires_at": 1760771800,
+  "payload": {
+    "title": "DevPilot_App",
+    "session_title": "DevPilot_App",
+    "tool_name": "run_shell_command",
+    "command_summary": "npm test",
+    "input_digest": "3a7bd2c1e9f80456",
+    "notify_only": true,
+    "hostname": "Erics-MacBook-Pro.local",
+    "host_ip": "192.168.1.23",
+    "tmux_session": "0",
+    "tmux_window": "0",
+    "tmux_pane": "%0",
+    "project_dir": "/Users/eric/Desktop/DevPilot_App",
+    "user": "eric",
+    "cwd": "/Users/eric/Desktop/DevPilot_App"
+  },
+  "ts": 1760770000
+}

@@ -17,6 +17,16 @@ func DisplayAgent(a Agent) string {
 		return "Codex"
 	case AgentOpenCode:
 		return "OpenCode"
+	case AgentGemini:
+		return "Gemini"
+	case AgentCopilot:
+		return "Copilot"
+	case AgentCursor:
+		return "Cursor"
+	case AgentGrok:
+		return "Grok"
+	case AgentQwen:
+		return "Qwen"
 	default:
 		return "Agent"
 	}
@@ -29,17 +39,28 @@ func DisplayAgent(a Agent) string {
 func ApprovalBody(env Envelope) string {
 	agent := DisplayAgent(env.Agent)
 	summary := PlainPreview(env.Payload.CommandSummary, 200)
+	// 只通知不阻塞的等待卡（TerminalOnly agent 的 PermissionRequest 通知、
+	// AskUserQuestion 历史链路）：手机上没有可点的决定，正文说清「在终端
+	// 等你」。放在 switch 之前：ExitPlanMode/AskUserQuestion 的特形文案
+	// 只属于可作答的链路。
+	if env.IsNotifyOnly() && env.Payload.ToolName != "ExitPlanMode" {
+		if env.Payload.ToolName == "AskUserQuestion" {
+			if summary == "" {
+				return agent + " has a question"
+			}
+			return Truncate(agent+" has a question — "+summary, 200)
+		}
+		if summary == "" {
+			return agent + " is waiting for approval"
+		}
+		return Truncate(agent+" is waiting for approval: "+summary, 200)
+	}
 	switch env.Payload.ToolName {
 	case "ExitPlanMode":
 		if summary == "" {
 			return "Plan ready for review"
 		}
 		return Truncate("Plan ready for review — "+summary, 200)
-	case "AskUserQuestion":
-		if summary == "" {
-			return agent + " has a question"
-		}
-		return Truncate(agent+" has a question — "+summary, 200)
 	}
 	tool := env.Payload.ToolName
 	if tool == "" {

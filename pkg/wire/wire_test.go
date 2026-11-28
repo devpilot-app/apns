@@ -492,3 +492,127 @@ func TestCloudApprovalStateRoutingHints(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentBatch2Valid v0.6.0 第二批 agent 通过白名单,锁屏抬头带品牌名,
+// 且向量目录里出现了对应取值(同 commit 内必须同时扩 Valid,否则
+// TestVectorsRoundTrip 会先红)。
+func TestAgentBatch2Valid(t *testing.T) {
+	cases := []struct {
+		a       Agent
+		display string
+	}{
+		{AgentGemini, "Gemini"},
+		{AgentCopilot, "Copilot"},
+		{AgentCursor, "Cursor"},
+		{AgentGrok, "Grok"},
+		{AgentQwen, "Qwen"},
+	}
+	for _, c := range cases {
+		env := Envelope{
+			V: Version, Kind: KindEvent, MsgID: "m", EventID: "e",
+			Type: EventApprovalRequired, Agent: c.a,
+			DaemonID: "dd_x", SessionID: "s", ApprovalID: "apv_x", TS: 1,
+		}
+		if err := env.Validate(); err != nil {
+			t.Fatalf("%s 应通过校验,实际 %v", c.a, err)
+		}
+		if got := DisplayAgent(c.a); got != c.display {
+			t.Fatalf("锁屏抬头应显示 %s,实际 %q", c.display, got)
+		}
+	}
+	if Agent("antigravity").Valid() {
+		t.Fatal("未登记的 agent 不应通过白名单")
+	}
+}
+
+// TestNotifyOnlyPredicate 只通知不阻塞的判定:显式 notify_only 或
+// AskUserQuestion 历史链路任一命中;普通审批卡不命中。
+func TestNotifyOnlyPredicate(t *testing.T) {
+	base := func(p Payload) Envelope {
+		return Envelope{
+			V: Version, Kind: KindEvent, MsgID: "m", EventID: "e",
+			Type: EventApprovalRequired, Agent: AgentGemini,
+			DaemonID: "dd_x", SessionID: "s", ApprovalID: "apv_x", TS: 1,
+			Payload: p,
+		}
+	}
+	if !base(Payload{NotifyOnly: true, ToolName: "run_shell_command"}).IsNotifyOnly() {
+		t.Fatal("显式 notify_only 应命中")
+	}
+	if !base(Payload{ToolName: "AskUserQuestion"}).IsNotifyOnly() {
+		t.Fatal("AskUserQuestion 历史链路应命中")
+	}
+	if base(Payload{ToolName: "Bash"}).IsNotifyOnly() {
+		t.Fatal("普通审批卡不应命中")
+	}
+}
+
+// TestNotifyOnlyOmitEmpty 旧 daemon 不发新字段:notify_only 缺省时整键不落。
+func TestNotifyOnlyOmitEmpty(t *testing.T) {
+	data, err := json.Marshal(Payload{Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "notify_only") {
+		t.Fatalf("缺省 notify_only 不应落键: %s", data)
+	}
+	data, err = json.Marshal(Payload{Title: "t", NotifyOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"notify_only":true`) {
+		t.Fatalf("notify_only=true 应落键: %s", data)
+	}
+}
+
+// TestApprovalBodyNotifyOnly 等待卡正文:TerminalOnly agent 的通知说清
+// 「在终端等你」;AskUserQuestion 的历史文案逐字不变。
+func TestApprovalBodyNotifyOnly(t *testing.T) {
+	env := Envelope{
+		V: Version, Kind: KindEvent, MsgID: "m", EventID: "e",
+		Type: EventApprovalRequired, Agent: AgentGemini,
+		DaemonID: "dd_x", SessionID: "s", ApprovalID: "apv_x", TS: 1,
+		Payload: Payload{NotifyOnly: true, ToolName: "run_shell_command", CommandSummary: "npm test"},
+	}
+	if got, want := ApprovalBody(env), "Gemini is waiting for approval: npm test"; got != want {
+		t.Fatalf("等待卡正文不符:\n got %q\nwant %q", got, want)
+	}
+	env.Payload.CommandSummary = ""
+	if got, want := ApprovalBody(env), "Gemini is waiting for approval"; got != want {
+		t.Fatalf("无摘要正文不符:\n got %q\nwant %q", got, want)
+	}
+	q := Envelope{
+		V: Version, Kind: KindEvent, MsgID: "m", EventID: "e",
+		Type: EventApprovalRequired, Agent: AgentClaude,
+		DaemonID: "dd_x", SessionID: "s", ApprovalID: "apv_x", TS: 1,
+		Payload: Payload{ToolName: "AskUserQuestion", CommandSummary: "Which DB?"},
+	}
+	if got, want := ApprovalBody(q), "Claude has a question — Which DB?"; got != want {
+		t.Fatalf("问题卡历史文案必须逐字不变:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestCloudApprovalStateNotifyOnly notify_only 透传进 content-state,缺省不落键。
+func TestCloudApprovalStateNotifyOnly(t *testing.T) {
+	env := Envelope{
+		Type: EventApprovalRequired, ApprovalID: "apv_x", Agent: AgentGrok,
+		DaemonID: "dd_1", SessionID: "sess_1", ExpiresAt: 1000, TS: 100,
+		Payload: Payload{SessionTitle: "t", NotifyOnly: true},
+	}
+	data, err := json.Marshal(CloudApprovalStateFor(env, 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"notifyOnly":true`) {
+		t.Fatalf("notifyOnly 应透传进 content-state: %s", data)
+	}
+	bare, err := json.Marshal(CloudApprovalStateFor(Envelope{
+		Type: EventApprovalRequired, ApprovalID: "apv_x", SessionID: "sess_1",
+		Payload: Payload{SessionTitle: "t"}}, 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(bare), "notifyOnly") {
+		t.Fatalf("缺省 notifyOnly 不应落键: %s", bare)
+	}
+}

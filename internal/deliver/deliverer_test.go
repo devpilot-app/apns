@@ -1242,3 +1242,64 @@ func TestCloseEndsCardWhenSessionDrained(t *testing.T) {
 		t.Fatalf("end 推送的 dismissal-date 必须在过去（立即移除）: %+v", last.APS)
 	}
 }
+
+// TestNotifyOnlyUsesQuestionCategory v0.6.0:notify_only 等待卡(TerminalOnly
+// agent 的 PermissionRequest 通知)与问题卡同串——手机上没有可点的决定,
+// 复用空动作 category;普通审批卡不受影响。
+func TestNotifyOnlyUsesQuestionCategory(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	clock := &testClock{t: time.Unix(testNow, 0)}
+	categoryOf := func(f *fakePusher) any {
+		t.Helper()
+		calls := f.snapshot()
+		if len(calls) != 1 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		return calls[0].Payload.(map[string]any)["aps"].(map[string]any)["category"]
+	}
+	waiting := func(approvalID string, agent wire.Agent) wire.Envelope {
+		env := event(wire.EventApprovalRequired, approvalID)
+		env.Agent = agent
+		env.Payload.ToolName = "run_shell_command"
+		env.Payload.NotifyOnly = true
+		return env
+	}
+
+	f := &fakePusher{}
+	d := New(Config{Store: s, Pusher: f, Metrics: metrics.New(), Now: clock.Now,
+		Throttle: time.Second, APNSCategory: "DEVPILOT_APPROVAL"})
+	d.Notify(context.Background(), dev, waiting("apv_n1", wire.AgentGemini))
+	if got := categoryOf(f); got != defaultQuestionCategory {
+		t.Fatalf("notify_only category = %v, want %s", got, defaultQuestionCategory)
+	}
+
+	// 闸门模式的审批(不带 notify_only)保持审批串
+	f2 := &fakePusher{}
+	d2 := New(Config{Store: s, Pusher: f2, Metrics: metrics.New(), Now: clock.Now,
+		Throttle: time.Second, APNSCategory: "DEVPILOT_APPROVAL"})
+	gate := waiting("apv_n2", wire.AgentGrok)
+	gate.Payload.NotifyOnly = false
+	d2.Notify(context.Background(), dev, gate)
+	if got := categoryOf(f2); got != "DEVPILOT_APPROVAL" {
+		t.Fatalf("gate category = %v", got)
+	}
+}
+
+// TestNotifyOnlyExpiredCloseIsSilent notify_only 等待卡过期不发「Missed
+// approval」:用户在终端处置,决策不回流,relay 只能等 pending 过期,
+// 这条 expired 不代表用户错过。
+func TestNotifyOnlyExpiredCloseIsSilent(t *testing.T) {
+	s, dev := setupStore(t, "apns-token")
+	clock := &testClock{t: time.Unix(testNow, 0)}
+
+	f := &fakePusher{}
+	d := New(Config{Store: s, Pusher: f, Metrics: metrics.New(), Now: clock.Now,
+		Throttle: time.Second, APNSCategory: "DEVPILOT_APPROVAL"})
+	n := event(wire.EventApprovalClosed, "apv_n_expired")
+	n.Payload.NotifyOnly = true
+	n.Payload.StatusText = wire.CloseReasonExpired
+	d.Notify(context.Background(), dev, n)
+	if calls := f.snapshot(); len(calls) != 0 {
+		t.Fatalf("notify_only expired close 不得再发通知,实际 %d 条", len(calls))
+	}
+}

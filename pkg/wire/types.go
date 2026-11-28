@@ -74,11 +74,25 @@ const (
 	AgentClaude   Agent = "claude"
 	AgentCodex    Agent = "codex"
 	AgentOpenCode Agent = "opencode"
+	// v0.6.0 增量:第二批 agent。取值与各 CLI 二进制名一致(hook 侧
+	// tmux 深探测按 argv0 basename 匹配,Cursor 的二进制名见 hook 侧
+	// Profile 的进程名提示)。
+	AgentGemini  Agent = "gemini"
+	AgentCopilot Agent = "copilot"
+	AgentCursor  Agent = "cursor"
+	AgentGrok    Agent = "grok"
+	AgentQwen    Agent = "qwen"
 )
 
 // Valid 判断 agent 是否受支持。
 func (a Agent) Valid() bool {
-	return a == AgentClaude || a == AgentCodex || a == AgentOpenCode
+	switch a {
+	case AgentClaude, AgentCodex, AgentOpenCode,
+		AgentGemini, AgentCopilot, AgentCursor, AgentGrok, AgentQwen:
+		return true
+	default:
+		return false
+	}
 }
 
 // DecisionKind 是人工审批结果。
@@ -178,10 +192,24 @@ type Payload struct {
 	// 与 Cwd 的区别：Cwd 跟随 agent 的 `cd`（Claude Code 官方文档明示），
 	// ProjectDir 整个会话不变——会话标题与 tmux 归属以它为准。加性字段。
 	ProjectDir string `json:"project_dir,omitempty"`
-	// User 是 hook 进程的 $USER，一键补建主机时预填用户名。
+	// NotifyOnly 标记「只通知不阻塞」的审批卡:hook 无法替用户作答(工具
+	// 没有 allow/deny 语义,或该 agent 的 hook 体系只能拒绝不能批准),
+	// 原生询问仍由终端承接。App 据此渲染 Answer at Terminal 样式(不出
+	// Approve/Deny 钮),relay 据此复用问题类 category(无动作)并在过期时
+	// 免推「Missed approval」。AskUserQuestion 卡是该形态的历史来源,谓词
+	// IsNotifyOnly 同时认两者;新增 agent 的等待确认卡一律带此标志。
+	// v0.6.0 增量字段:旧 daemon 不发、旧 relay/App 解码忽略,零影响。
+	NotifyOnly bool `json:"notify_only,omitempty"`
+	// User 是 hook 进程的 $USER,一键补建主机时预填用户名。
 	User string `json:"user,omitempty"`
-	// Cwd 是会话完整工作目录：仅用于 App 端会话/项目匹配，不进入通知文案。
+	// Cwd 是会话完整工作目录:仅用于 App 端会话/项目匹配,不进入通知文案。
 	Cwd string `json:"cwd,omitempty"`
+}
+
+// IsNotifyOnly 判断该审批卡是否「只通知不阻塞」。ToolName 判断是
+// AskUserQuestion 历史链路的兼容回落;新链路一律显式携带 NotifyOnly。
+func (e Envelope) IsNotifyOnly() bool {
+	return e.Payload.NotifyOnly || e.Payload.ToolName == "AskUserQuestion"
 }
 
 // Envelope 是 kind=event 的消息体。
