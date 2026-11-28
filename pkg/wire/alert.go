@@ -1,6 +1,9 @@
 package wire
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // 审批通知的可见文案生成。
 //
@@ -39,6 +42,12 @@ func DisplayAgent(a Agent) string {
 func ApprovalBody(env Envelope) string {
 	agent := DisplayAgent(env.Agent)
 	summary := PlainPreview(env.Payload.CommandSummary, 200)
+	// 新版 hook 已给文件类工具生成带动词的完整短语（"Claude wants to read:
+	// foo.swift"，见 hook agent.toolLead）；这里若再包一层 "%s wants to run
+	// %s" 会双前缀。识别到 hook 短语就原样透传（只做长度截断）。
+	if strings.HasPrefix(summary, agent+" wants to ") {
+		return Truncate(summary, 200)
+	}
 	// 只通知不阻塞的等待卡（TerminalOnly agent 的 PermissionRequest 通知、
 	// AskUserQuestion 历史链路）：手机上没有可点的决定，正文说清「在终端
 	// 等你」。放在 switch 之前：ExitPlanMode/AskUserQuestion 的特形文案

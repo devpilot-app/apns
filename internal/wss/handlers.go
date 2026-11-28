@@ -2,6 +2,7 @@ package wss
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/devpilot-app/apns/internal/id"
@@ -53,6 +54,24 @@ func (h *Hub) onEvent(ctx context.Context, c *Conn, env *wire.Envelope) {
 			h.ack(c, env.MsgID, env.EventID, env.ApprovalID, wire.AckRejected)
 			return
 		}
+		h.log.Info("approval created", "approval_id", stored.ApprovalID,
+			"daemon_id", stored.DaemonID, "session_id", stored.SessionID,
+			"agent", string(stored.Agent), "expires_at", p.ExpiresAt)
+	}
+	if stored.Type == wire.EventApprovalClosed {
+		// daemon 自发收场（终端里已答完 / hook 超时取消）也要落账：状态不翻
+		// 的话 /v1/pending、resync pending[]、指标、legacy handoff 全把已收场
+		// 审批当 open，sweeper 到期还会补发一条 expired close（2026-11-28
+		// 真机：四张终端已答完的卡滞留 30 分钟即此洞）。须在扇出前翻转，
+		// sendSessionCard 的 handoff 计数才能看到正确状态。
+		flipped, err := h.cfg.Store.ClosePending(stored.ApprovalID, stored.DaemonID, stored.Payload.StatusText, now)
+		if err != nil {
+			// 落账失败不阻断扇出：inbox 里已有 close，App 端对账仍能收卡；
+			// 但状态错误要留痕。
+			h.log.Error("failed to close pending approval", "approval_id", stored.ApprovalID, "err", err)
+		}
+		h.log.Info("approval closed", "approval_id", stored.ApprovalID,
+			"reason", stored.Payload.StatusText, "source", "daemon", "flipped", flipped)
 	}
 
 	h.sendToApps(stored.DaemonID, stored)
@@ -142,6 +161,13 @@ func (h *Hub) SynthesizeClose(p store.Pending, reason string, originDeviceID str
 		return
 	}
 	h.cfg.Metrics.IncEvent(string(wire.EventApprovalClosed))
+	// source 判据：reason=expired 只可能来自过期清理循环；其余来自决策落地。
+	source := "decision"
+	if reason == wire.CloseReasonExpired {
+		source = "expired"
+	}
+	h.log.Info("approval closed", "approval_id", p.ApprovalID,
+		"reason", reason, "source", source)
 	h.sendToApps(p.DaemonID, stored)
 	h.notify(context.Background(), stored, originDeviceID)
 }
@@ -178,19 +204,79 @@ func (h *Hub) onLAToken(c *Conn, l *wire.LAToken) {
 	default:
 		// ApprovalID 非空 = 新版 App 的一审批一卡 token（只用于该审批的收场
 		// end）；空 = 旧版 App 的会话级 token。落库按键空间分流见 store.LAToken。
-		if err := h.cfg.Store.PutLAToken(store.LAToken{
+		token := store.LAToken{
 			DeviceID: c.ID, DaemonID: l.DaemonID, SessionID: l.SessionID,
 			ApprovalID: l.ApprovalID,
 			PushToken:  l.PushToken, UpdatedAt: h.now().Unix(),
-		}); err != nil {
+		}
+		if err := h.cfg.Store.PutLAToken(token); err != nil {
 			h.log.Warn("failed to save LA token", "session_id", l.SessionID, "err", err)
 			status = wire.AckRejected
+			break
+		}
+		// 设备行可能已解绑（解绑与上报竞态）：解绑则无从补发，跳过即可。
+		if token.ApprovalID != "" {
+			if dev, err := h.cfg.Store.Device(c.ID); err == nil {
+				h.retroactiveEndIfClosed(context.Background(), dev, token)
+			}
 		}
 	}
 	_ = c.Send(wire.LATokenAck{
 		V: wire.Version, Kind: wire.KindLATokenAck, MsgID: id.New(),
 		RefID: l.MsgID, Status: status, TS: h.now().Unix(),
 	})
+}
+
+// RegisterApprovalLAToken 是 REST /v1/la-tokens 的落库入口，与 WSS onLAToken
+// 同路；落库后做同样的迟到 token 补发（见 retroactiveEndIfClosed）。
+func (h *Hub) RegisterApprovalLAToken(device store.Device, token store.LAToken) error {
+	token.DeviceID = device.ID
+	token.UpdatedAt = h.now().Unix()
+	if err := h.cfg.Store.PutLAToken(token); err != nil {
+		return err
+	}
+	if token.ApprovalID != "" {
+		h.retroactiveEndIfClosed(context.Background(), device, token)
+	}
+	return nil
+}
+
+// retroactiveEndIfClosed 补发收场 end：push-to-start 起卡的是 relay，而收场
+// end 需要的 per-approval token 必须等 App 上报——token 迟到时审批可能已被
+// （手机决策 / daemon 终端收场 / 过期）终结，当时的 end 推送因查无 token 被
+// 静默跳过，卡只能干等到 App 自行对账。这里在 token 落库后复查状态：非
+// pending 即对该设备补发 approval_closed end 推送（notifyDevice 单设备扇出，
+// 后台执行不阻塞读循环；alert 腿因卡路径从未发过 alert 天然静默，I1/I2 不破）。
+// 审批行在 ExpiresAt+10min 后被清理：查无记录说明早过收场窗，交给 App 侧
+// 僵尸对账兜底。
+func (h *Hub) retroactiveEndIfClosed(ctx context.Context, device store.Device, token store.LAToken) {
+	p, err := h.cfg.Store.GetPending(token.ApprovalID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			h.log.Warn("failed to read pending approval for late LA token",
+				"approval_id", token.ApprovalID, "device_id", device.ID, "err", err)
+		}
+		return
+	}
+	if p.Status == "pending" {
+		return
+	}
+	pl := p.Event.Payload
+	pl.StatusText = p.Status
+	closeEnv := wire.Envelope{
+		V: wire.Version, Kind: wire.KindEvent, MsgID: id.New(),
+		EventID:    "close-" + p.ApprovalID,
+		ApprovalID: p.ApprovalID,
+		Type:       wire.EventApprovalClosed,
+		Agent:      p.Event.Agent,
+		DaemonID:   p.DaemonID,
+		SessionID:  p.Event.SessionID,
+		Payload:    pl,
+		TS:         h.now().Unix(),
+	}
+	h.log.Info("retroactive card end for late LA token", "approval_id", p.ApprovalID,
+		"device_id", device.ID, "status", p.Status)
+	go h.notifyDevice(ctx, device, closeEnv, "")
 }
 
 // sendResync 返回 pending 审批与收件箱增量。

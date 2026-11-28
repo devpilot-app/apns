@@ -390,10 +390,12 @@ func (s *Server) handleLATokenREST(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "missing push_token")
 			return
 		}
-		if err := s.cfg.Store.PutLAToken(store.LAToken{
-			DeviceID: device.ID, DaemonID: device.DaemonID, SessionID: req.SessionID,
+		// 经 Hub 同路落库：token 迟到而审批已收场时，顺手对该设备补发收场
+		// end（push-to-start 起卡与 App 上报 token 之间的竞态兜底）。
+		if err := s.cfg.Hub.RegisterApprovalLAToken(device, store.LAToken{
+			DaemonID: device.DaemonID, SessionID: req.SessionID,
 			ApprovalID: strings.TrimSpace(req.ApprovalID),
-			PushToken:  req.PushToken, UpdatedAt: s.now().Unix(),
+			PushToken:  req.PushToken,
 		}); err != nil {
 			s.internal(w, "failed to save LA token", err)
 			return

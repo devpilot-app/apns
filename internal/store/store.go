@@ -857,6 +857,43 @@ func (s *Store) ApplyDecision(approvalID, daemonID, decision, choice string, now
 	return status, out, err
 }
 
+// ClosePending 把一条 pending 审批标记为 daemon 上报的终态（daemon 自发
+// approval_closed 的落账入口，2026-11-28 起）。此前 daemon close 只进 inbox
+// 不改状态：/v1/pending、resync pending[]、指标与 legacy handoff 都把已收场
+// 审批当 open，sweeper 到期还会补发一条 expired close。
+//
+// 语义与 ApplyDecision 对齐：first-wins（已非 pending 一律不改写）、跨
+// daemon 不泄露存在性（一律 false）、status 只收四个合法终态。Decision /
+// Choice / DeliverUntil 保持不动——这不是一次手机决策，投递窗口无意义；
+// DecidedAt 记收场时刻供排障。
+func (s *Store) ClosePending(approvalID, daemonID, status string, now int64) (bool, error) {
+	switch status {
+	case "approved", "denied", "expired", "cancelled":
+	default:
+		return false, fmt.Errorf("store: invalid close status %q", status)
+	}
+	flipped := false
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketPending)
+		raw := bucket.Get([]byte(approvalID))
+		if raw == nil {
+			return nil
+		}
+		var p Pending
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return err
+		}
+		if p.DaemonID != daemonID || p.Status != "pending" {
+			return nil
+		}
+		p.Status = status
+		p.DecidedAt = now
+		flipped = true
+		return putJSON(bucket, approvalID, p)
+	})
+	return flipped, err
+}
+
 // UndeliveredDecisions 返回已决策但 daemon 尚未确认的审批。
 func (s *Store) UndeliveredDecisions(daemonID string, now int64) ([]Pending, error) {
 	var out []Pending

@@ -616,3 +616,29 @@ func TestCloudApprovalStateNotifyOnly(t *testing.T) {
 		t.Fatalf("缺省 notifyOnly 不应落键: %s", bare)
 	}
 }
+
+// TestApprovalBodyPassesThroughHookPhrasedSummary 钉防双前缀闸：新版 hook 给
+// 文件类工具生成带动词的完整短语（"Claude wants to read: foo.swift"），
+// ApprovalBody 若再包一层 "%s wants to run %s" 会变成双前缀。识别到 hook
+// 短语必须原样透传；非 hook 短语的老摘要行为逐字不变。
+func TestApprovalBodyPassesThroughHookPhrasedSummary(t *testing.T) {
+	env := Envelope{
+		V: Version, Kind: KindEvent, MsgID: "m", EventID: "e",
+		Type: EventApprovalRequired, Agent: AgentClaude,
+		DaemonID: "dd_x", SessionID: "s", ApprovalID: "apv_x", TS: 1,
+		Payload: Payload{ToolName: "Read", CommandSummary: "Claude wants to read: foo.swift"},
+	}
+	if got, want := ApprovalBody(env), "Claude wants to read: foo.swift"; got != want {
+		t.Fatalf("hook 短语被二次包装:\n got %q\nwant %q", got, want)
+	}
+	// 旧 hook（无动词短语）保持原样。
+	env.Payload.CommandSummary = "/Users/x/foo.swift"
+	if got, want := ApprovalBody(env), "Claude wants to run Read: /Users/x/foo.swift"; got != want {
+		t.Fatalf("旧摘要行为被改变:\n got %q\nwant %q", got, want)
+	}
+	// 其他 agent 的同形短语不透传（agent 抬头不匹配时不豁免）。
+	env.Payload.CommandSummary = "Codex wants to read: foo.swift"
+	if got, want := ApprovalBody(env), "Claude wants to run Read: Codex wants to read: foo.swift"; got != want {
+		t.Fatalf("异 agent 短语应走旧路径:\n got %q\nwant %q", got, want)
+	}
+}

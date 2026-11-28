@@ -574,6 +574,8 @@ func (d *Deliverer) startApprovalCard(tier store.Tier, device store.Device, env 
 	if !res.Accepted() {
 		d.log.Info("cloud approval card not accepted by APNs; falling back to alert",
 			"device_id", device.ID, "approval_id", env.ApprovalID, "status", res.Status, "reason", res.Reason)
+	} else {
+		d.log.Info("approval card started", "device_id", device.ID, "approval_id", env.ApprovalID)
 	}
 	return res.Accepted()
 }
@@ -581,9 +583,9 @@ func (d *Deliverer) startApprovalCard(tier store.Tier, device store.Device, env 
 // endApprovalCard 给一条审批自己的卡发收场 end 推送。
 //
 // tok 可为 nil（按 approval_id 现查）。卡 token 由 App 在卡出现时上报
-// （/v1/la-tokens 带 approval_id）；没上报就无卡可收，卡面清理由 App 侧对账
-// 兜底。发完即剪：审批已终结，这条 token 不再有用途；仅传输类失败保留，
-// 留给 cleanup 的 TTL。
+// （/v1/la-tokens 带 approval_id）；没上报就无卡可收——relay 侧的迟到 token
+// 补发（hub.retroactiveEndIfClosed）与 App 侧对账先后兜底。发完即剪：审批已
+// 终结，这条 token 不再有用途；仅传输类失败保留，留给 cleanup 的 TTL。
 func (d *Deliverer) endApprovalCard(tier store.Tier, device store.Device, env wire.Envelope, tok *store.LAToken) {
 	if tok == nil {
 		found, ok, err := d.cfg.Store.LATokenForApproval(device.ID, env.ApprovalID)
@@ -592,6 +594,10 @@ func (d *Deliverer) endApprovalCard(tier store.Tier, device store.Device, env wi
 			return
 		}
 		if !ok {
+			// 仅 approval_closed 路径会以 tok=nil 进来；这条 Warn 是「token
+			// 从未上报」的唯一留痕（2026-11-28 真机滞卡的第一现场）。
+			d.log.Warn("approval card end skipped: no push token reported",
+				"device_id", device.ID, "approval_id", env.ApprovalID, "reason", env.Payload.StatusText)
 			return
 		}
 		tok = &found
@@ -606,11 +612,18 @@ func (d *Deliverer) endApprovalCard(tier store.Tier, device store.Device, env wi
 		Expiration:  now + liveActivityTTL,
 		Payload:     wire.CloudApprovalPushFor(env, now, false),
 	})
-	// Status 0 = 没发出去（传输失败/配额拦截），不剪 token。
-	if res.Status != 0 {
-		if err := d.cfg.Store.DeleteApprovalLAToken(device.ID, tok.ApprovalID); err != nil {
-			d.log.Warn("failed to delete approval LA token", "device_id", device.ID, "approval_id", tok.ApprovalID, "err", err)
-		}
+	if res.Status == 0 {
+		// Status 0 = 没发出去（传输失败/配额拦截），不剪 token。
+		d.log.Warn("approval card end not delivered; token kept",
+			"device_id", device.ID, "approval_id", tok.ApprovalID, "reason", env.Payload.StatusText)
+		return
+	}
+	if res.Accepted() {
+		d.log.Info("approval card end pushed", "device_id", device.ID,
+			"approval_id", tok.ApprovalID, "reason", env.Payload.StatusText)
+	}
+	if err := d.cfg.Store.DeleteApprovalLAToken(device.ID, tok.ApprovalID); err != nil {
+		d.log.Warn("failed to delete approval LA token", "device_id", device.ID, "approval_id", tok.ApprovalID, "err", err)
 	}
 }
 
